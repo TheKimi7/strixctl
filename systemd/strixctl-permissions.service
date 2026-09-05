@@ -1,0 +1,13 @@
+[Unit]
+Description=Grant the ASUS control knobs to the users group (strixctl)
+After=sysinit.target
+# platform_profile has no udev device, so it can only be caught here.
+ConditionPathExists=/sys/class/dmi/id/board_name
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/strixctl/strixctl-grant
+
+[Install]
+WantedBy=multi-user.target

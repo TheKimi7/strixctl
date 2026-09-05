@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=strixctl
+GenericName=ASUS ROG Controls
+Comment=Battery charge limit, fan curves and keyboard backlight for ASUS ROG laptops
+Exec=strixctl gui
+Icon=computer
+Terminal=false
+Categories=System;Settings;HardwareSettings;
+Keywords=battery;fan;charge;asus;rog;backlight;

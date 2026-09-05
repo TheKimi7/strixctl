@@ -1,0 +1,17 @@
+# strixctl -- rootless access to the ASUS control knobs.
+#
+# Two different idioms are needed here, deliberately:
+#
+#   * hidraw is a real device node, so GROUP/MODE apply to it directly.
+#   * sysfs *attributes* are not device nodes, so GROUP/MODE would silently do
+#     nothing.  They need an explicit chgrp/chmod, which is the same shape the
+#     well-known backlight-permission rule uses.
+
+# Keyboard RGB: ASUS N-KEY device.  It exposes several hidraw interfaces and
+# only one accepts lighting reports, so grant all of them and let the client try.
+KERNEL=="hidraw*", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1866", GROUP="users", MODE="0660"
+
+# Sysfs attributes: re-grant whenever the owning device appears or is rebound.
+ACTION=="add|change", SUBSYSTEM=="hwmon", ATTR{name}=="asus_custom_fan_curve", RUN+="/usr/lib/strixctl/strixctl-grant"
+ACTION=="add|change", SUBSYSTEM=="power_supply", KERNEL=="BAT*", RUN+="/usr/lib/strixctl/strixctl-grant"
+ACTION=="add|change", SUBSYSTEM=="leds", KERNEL=="asus::kbd_backlight", RUN+="/usr/lib/strixctl/strixctl-grant"

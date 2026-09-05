@@ -1,0 +1,10 @@
+[Unit]
+Description=Restore the saved strixctl profile
+After=graphical-session.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/strixctl apply
+
+[Install]
+WantedBy=default.target
