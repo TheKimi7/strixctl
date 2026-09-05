@@ -80,7 +80,9 @@ TIMEOUT = 30
 
 #: Searched in order. AppRun paths come first because a type-2 AppImage needs
 #: libfuse2, which Debian 13 does not ship -- extracting it is the usual fix.
+#: The first entry is where get-openrgb.sh puts it.
 CANDIDATE_BINARIES = (
+    "~/.local/share/strixctl/openrgb/squashfs-root/AppRun",
     "~/Downloads/squashfs-root/AppRun",
     "~/Applications/squashfs-root/AppRun",
     "/opt/openrgb/AppRun",
@@ -122,6 +124,17 @@ class Device:
         return f"<{self.index}: {self.name} ({self.leds} zones, {self.location})>"
 
 
+def _beside_package():
+    """`openrgb/` next to the package, where `get-openrgb.sh --here` puts it.
+
+    Resolving it from `__file__` rather than the working directory means it is
+    found both from a git clone and from an install prefix.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(os.path.dirname(here), "openrgb", "squashfs-root",
+                        "AppRun")
+
+
 def find_binary(override=None):
     for candidate in filter(None, (override,)):
         path = os.path.expanduser(candidate)
@@ -131,7 +144,7 @@ def find_binary(override=None):
         found = shutil.which(name)
         if found:
             return found
-    for candidate in CANDIDATE_BINARIES:
+    for candidate in CANDIDATE_BINARIES + (_beside_package(),):
         path = os.path.expanduser(candidate)
         if os.path.isfile(path) and os.access(path, os.X_OK):
             return path
@@ -205,7 +218,7 @@ class Aura:
     def why_unavailable(self, mode=None):
         if self.binary is None:
             return ("OpenRGB not found. Install it and either put it on PATH or "
-                    "set openrgb.binary in config.json — searched: "
+                    "set openrgb.binary in config.json. Searched: "
                     + ", ".join(CANDIDATE_BINARIES))
         if mode is not None and self.device_for(mode) is None:
             return ("OpenRGB found at %s, but no entry it lists offers %r"

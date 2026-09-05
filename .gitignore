@@ -1,2 +1,5 @@
 __pycache__/
 *.pyc
+
+# OpenRGB fetched by ./get-openrgb.sh --here
+/openrgb/

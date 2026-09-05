@@ -28,7 +28,7 @@ class Tray:
         active = conf.get("active_profile")
 
         limit = battery.limit if battery.available else None
-        tooltip = f"strixctl — {active}"
+        tooltip = f"strixctl: {active}"
         if limit is not None:
             tooltip += f", charge stop {limit}%"
         self.icon.set_tooltip_text(tooltip)

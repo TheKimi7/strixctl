@@ -1,7 +1,7 @@
 # strixctl
 
 Battery charge limit, fan curves and keyboard backlight for ASUS ROG laptops on
-Linux — a small GTK3 app that talks to the kernel's own sysfs interfaces.
+Linux. A small GTK3 app that talks to the kernel's own sysfs interfaces.
 
 Built and tested on a **ROG Strix G712LU**, Debian 13 (trixie), kernel 6.12,
 Cinnamon.
@@ -19,14 +19,14 @@ It is, though, genuinely used and genuinely tested: every claim below about what
 this hardware does was checked by running it and looking at the keyboard, not
 inferred from a datasheet. Where something is untested, it says so.
 
-**Edits are most welcome** — issues, pull requests, or just a note saying what
+**Edits are most welcome**: issues, pull requests, or just a note saying what
 did or did not work on your model. If you own an ASUS ROG laptop that is not a
 G712LU, the most useful thing you can send is your `/sys/class/dmi/id/board_name`
 together with the output of `strixctl colour list`.
 
 ## Why another one
 
-There are good tools in this space already — [zhelper][zhelper] (GTK4/libadwaita,
+There are good tools in this space already, such as [zhelper][zhelper] (GTK4/libadwaita,
 ASUS-specific), [batctl][batctl] (TUI/CLI, generic vendor detection),
 [asusctl][asusctl] (the reference implementation, Rust). strixctl exists because
 of three gaps:
@@ -94,7 +94,7 @@ strixctl colour ff0000 --mode "Starry Night"    # works, untested here
 strixctl colour ff0000 --mode "Nonsense"        # Error: Mode not available
 ```
 
-There is no sysfs path to colour on this chassis — `asus::kbd_backlight` is
+There is no sysfs path to colour on this chassis. `asus::kbd_backlight` is
 brightness only, and nothing under `/sys/class/leds` carries a colour
 attribute. Colour means HID writes to the ASUS N-KEY device (`0b05:1866`).
 
@@ -110,8 +110,8 @@ does not state its endianness. For a knob that changes on a profile switch,
 `subprocess.run` is the better trade.
 
 **Device selection is by name, LED count and advertised effect, never by
-index.** On the G712LU, OpenRGB reports the one physical keyboard *six* times —
-once each on `hidraw1` and `hidraw2`, and four times on `hidraw3` — plus a
+index.** On the G712LU, OpenRGB reports the one physical keyboard *six* times,
+once each on `hidraw1` and `hidraw2` and four times on `hidraw3`, plus a
 seventh entry, a per-key `G533ZM` one (also on `hidraw3`), because it has no
 G712LU profile of its own (`[G712LU] device capabilities not found`).
 
@@ -121,7 +121,7 @@ the effect decides which one a write goes to:
 - the **4-zone** entries take four independent colours, one per zone, but offer
   only Static, Breathing and Color Cycle;
 - the **per-key** entry offers every effect, but a colour list sent there would
-  paint the first four *keys* rather than the four zones — so it is used only
+  paint the first four *keys* rather than the four zones, so it is used only
   for effects that need at most one colour.
 
 `strixctl colour list` shows the whole picture:
@@ -133,19 +133,15 @@ z 1: ASUS Aura Keyboard (4 leds, HID: /dev/hidraw2)  per-zone colour, three effe
 k 5: G533ZM (83 leds, HID: /dev/hidraw3)  one colour, every effect
 ```
 
-Install OpenRGB however you like. strixctl searches `PATH` and the usual
-AppImage locations; set `openrgb.binary` in `config.json` to point at it
-directly. On Debian 13 the AppImage needs `libfuse2`, which trixie does not
-ship — extract it instead:
-
-```sh
-./OpenRGB.AppImage --appimage-extract      # then ./squashfs-root/AppRun
-```
+`./get-openrgb.sh` handles installing it; see
+[Requirements](#requirements). If you would rather do it by hand, strixctl
+searches `PATH` and the usual AppImage locations, and `openrgb.binary` in
+`config.json` overrides the search.
 
 You do **not** need OpenRGB's own udev rules for the keyboard: the rule
 strixctl installs already grants the N-KEY device to your group, so OpenRGB
 finds it without root. (Its other device classes, i2c especially, still want
-root — that is what its warning is about.)
+root, which is what its warning is about.)
 
 [openrgb]: https://openrgb.org
 
@@ -165,7 +161,7 @@ than refusing to start:
 | Keyboard colour | an ASUS N-KEY USB device, plus OpenRGB |
 
 **Runtime.** Python 3 and the GTK 3 introspection bindings. Nothing from PyPI,
-no virtualenv, nothing to compile — the code uses no syntax newer than
+no virtualenv, nothing to compile. The code uses no syntax newer than
 f-strings and is developed on Python 3.13.
 
 ```sh
@@ -174,18 +170,37 @@ sudo apt install python3-gi python3-gi-cairo gir1.2-gtk-3.0 gir1.2-xapp-1.0
 
 | Package | Why |
 | --- | --- |
-| `python3-gi` | PyGObject — the GTK bindings everything is built on |
+| `python3-gi` | PyGObject, the GTK bindings everything is built on |
 | `python3-gi-cairo` | Cairo drawing, for the fan curve plot and the colour wheel |
 | `gir1.2-gtk-3.0` | the GTK 3 and GDK typelibs |
-| `gir1.2-xapp-1.0` | the tray icon only, and imported lazily — leave it out if you never run `strixctl tray` |
+| `gir1.2-xapp-1.0` | the tray icon only, and imported lazily, so leave it out if you never run `strixctl tray` |
 
 GTK 3 rather than GTK 4 because this targets Cinnamon, whose tray API (XApp) is
 GTK 3 only.
 
-**Optional: [OpenRGB][openrgb]**, needed only for keyboard *colour*; everything
-else works without it. See [Keyboard colour goes through
-OpenRGB](#keyboard-colour-goes-through-openrgb) for why, and for the extraction
-step Debian 13 needs.
+**Optional: [OpenRGB][openrgb]**, needed only for keyboard *colour*. Everything
+else works without it. There is a script for this, so you do not have to think
+about AppImages or fuse:
+
+```sh
+./get-openrgb.sh
+```
+
+It downloads a pinned OpenRGB release, checks it against a known SHA-256,
+extracts it (Debian 13 ships no libfuse2, so a type-2 AppImage cannot mount
+itself) and puts it in `~/.local/share/strixctl/openrgb`, which strixctl
+searches on its own. Pass `--here` to put it in `./openrgb` beside the checkout
+instead, which is handy when hacking on strixctl; that path is gitignored and
+also searched.
+
+The script refuses to run as root, and is kept out of `install.sh` on purpose:
+that runs with sudo, and downloading a 33 MB binary and unpacking it as root is
+a worse trade than typing one more command. `install.sh` only tells you the
+script exists if it cannot find OpenRGB.
+
+If you would rather install OpenRGB your own way, strixctl looks on `PATH` and
+in the usual AppImage locations, or you can point `openrgb.binary` in
+`config.json` straight at it.
 
 ## Install
 
@@ -211,7 +226,7 @@ The installer writes a udev rule and a oneshot service that together grant the
 knobs to the `users` group (override with `STRIXCTL_GROUP=`). Both are needed:
 udev covers the device-backed attributes, and the service covers
 `/sys/firmware/acpi/platform_profile`, which is **not** a udev device on kernels
-before 6.14 — there is no `platform-profile` class for a rule to match.
+before 6.14, and there is no `platform-profile` class for a rule to match.
 
 To restore your profile at login:
 
@@ -239,7 +254,7 @@ Config lives in `~/.config/strixctl/config.json`.
 
 ## Editing a curve
 
-Drag the control points on the graph, or type into the spin buttons — they are
+Drag the control points on the graph, or type into the spin buttons. They are
 two views of the same numbers, so either updates the other. Dragging is
 constrained to the set of curves that pass validation, so a shape you can draw
 is always a shape that will apply: each point is held between its neighbours,
@@ -254,7 +269,7 @@ the window, one item in the tray menu, and `strixctl fans reset` on the command
 line.
 
 Switching the platform profile makes the firmware reload its own curve, so
-strixctl re-arms a custom curve immediately afterwards. That ordering matters —
+strixctl re-arms a custom curve immediately afterwards. That ordering matters,
 applying the curve first and the profile second silently loses the curve.
 
 ## Known gaps

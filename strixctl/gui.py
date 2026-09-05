@@ -417,7 +417,7 @@ class StrixWindow(Gtk.Window):
         hint = Gtk.Label(xalign=0)
         hint.get_style_context().add_class("dim-label")
         hint.set_text("Drag a point to reshape the curve. The dashed line is the "
-                      "safety floor — the last point cannot go below it.")
+                      "safety floor: the last point cannot go below it.")
         hint.set_line_wrap(True)
         page.pack_start(hint, False, False, 0)
 
@@ -523,7 +523,7 @@ class StrixWindow(Gtk.Window):
             device = self.aura.find_keyboard()
             if device is not None:
                 note.set_text(
-                    f"Driven through OpenRGB ({self.aura.binary}) — "
+                    f"Driven through OpenRGB ({self.aura.binary}): "
                     f"{device.name}, {device.leds} zones on {device.location}. "
                     "Each change spawns OpenRGB, so it takes a couple of seconds.")
             else:
@@ -532,7 +532,7 @@ class StrixWindow(Gtk.Window):
             note.set_text(
                 "Keyboard colour needs OpenRGB, which was not found.\n\n"
                 "This chassis exposes no colour attribute in sysfs, so colour "
-                "means HID writes to the N-KEY device — strixctl hands that job "
+                "means HID writes to the N-KEY device, and strixctl hands that job "
                 "to OpenRGB rather than reimplementing it.\n\n"
                 + self.aura.why_unavailable())
         page.pack_start(note, False, False, 0)
@@ -567,7 +567,7 @@ class StrixWindow(Gtk.Window):
         note.get_style_context().add_class("dim-label")
         note.set_text(
             "ASUS exposes only a stop threshold, so there is no separate "
-            "recharge floor — charging simply halts at this level.")
+            "recharge floor: charging simply halts at this level.")
         page.pack_start(note, False, False, 0)
 
         self.battery_switch.toggled()
@@ -712,7 +712,7 @@ class StrixWindow(Gtk.Window):
         elif single:
             self.zone_hint.set_text(
                 f"{mode} runs on the per-key entry, which takes one colour for "
-                "the whole keyboard — zone 1's colour is used.")
+                "the whole keyboard, so zone 1's colour is used.")
         else:
             self.zone_hint.set_text(
                 "Pick a zone, then set its colour with the wheel, the R/G/B "
@@ -831,7 +831,7 @@ class StrixWindow(Gtk.Window):
         failures = [f"{knob}: {detail}"
                     for knob, state, detail in results if state == "failed"]
         if failures:
-            self.set_status("Applied with problems — " + "; ".join(failures))
+            self.set_status("Applied with problems: " + "; ".join(failures))
         else:
             applied = [knob for knob, state, _ in results if state == "ok"]
             self.set_status("Applied: " + ", ".join(applied) if applied

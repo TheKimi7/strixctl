@@ -133,7 +133,7 @@ def cmd_colour(args):
                 mark, role = " ", ""
             print(f"{mark} {device.index}: {device.name} "
                   f"({device.leds} leds, {device.location})  {role}")
-        print("\nz = zoned entry, k = per-key entry — both are the same "
+        print("\nz = zoned entry, k = per-key entry. Both are the same "
               "keyboard, and\nthe effect decides which one a write goes to.")
         if aura.modes:
             print("\neffects:")

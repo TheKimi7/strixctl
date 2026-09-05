@@ -25,6 +25,8 @@ uninstall() {
     rm -f "$BINDIR/strixctl"
     rm -f /etc/udev/rules.d/99-strixctl.rules
     rm -f /usr/share/applications/strixctl.desktop
+    # $LIBDIR goes wholesale below, which takes get-openrgb.sh with it. What it
+    # downloaded lives in the user's home and is left alone.
     systemctl disable --now strixctl-permissions.service 2>/dev/null || true
     rm -f /etc/systemd/system/strixctl-permissions.service
     rm -f /usr/lib/systemd/user/strixctl-apply.service
@@ -97,6 +99,10 @@ sed -i "s|/usr/bin/strixctl|$BINDIR/strixctl|" \
 install -d /usr/share/applications
 install -m 0644 "$SRC/strixctl.desktop" /usr/share/applications/strixctl.desktop
 
+# Copied so it still works once the clone is gone. It refuses to run as root,
+# so it is only ever invoked by the user afterwards, never from here.
+install -m 0755 "$SRC/get-openrgb.sh" "$LIBDIR/get-openrgb.sh"
+
 udevadm control --reload-rules
 udevadm trigger --subsystem-match=hwmon --subsystem-match=power_supply \
     --subsystem-match=leds --subsystem-match=hidraw 2>/dev/null || true
@@ -113,6 +119,20 @@ if [ -n "$TARGET_USER" ] && ! id -nG "$TARGET_USER" | tr ' ' '\n' | grep -qx "$G
     echo
     echo "WARNING: $TARGET_USER is not in the '$GROUP' group."
     echo "  sudo usermod -aG $GROUP $TARGET_USER   # then log out and back in"
+fi
+
+# Keyboard colour is the one control with an external dependency. Say so here
+# rather than leaving the user to work out why that page is greyed out.
+TARGET_HOME="$(getent passwd "${SUDO_USER:-root}" | cut -d: -f6)"
+if ! command -v openrgb >/dev/null 2>&1 &&
+   [ ! -x "$TARGET_HOME/.local/share/strixctl/openrgb/squashfs-root/AppRun" ]; then
+    echo
+    echo "Keyboard colour needs OpenRGB, which was not found."
+    echo "  Fetch it as yourself, not with sudo, from this checkout:"
+    echo "      ./get-openrgb.sh"
+    echo "  Or later, once this checkout is gone:"
+    echo "      $LIBDIR/get-openrgb.sh"
+    echo "  Everything else works without it."
 fi
 
 echo
