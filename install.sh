@@ -2,6 +2,7 @@
 # strixctl installer.  Run once with sudo; after that nothing needs root.
 #
 #   sudo ./install.sh              install
+#   sudo ./install.sh --with-deps  install, apt-getting the GTK bits first
 #   sudo ./install.sh --uninstall  remove
 #
 # The point of the install is the udev rule and the boot-time grant service:
@@ -40,9 +41,69 @@ uninstall() {
 
 [ "${1:-}" = "--uninstall" ] && uninstall
 
+WITH_DEPS=""
+[ "${1:-}" = "--with-deps" ] && WITH_DEPS=1
+
 if ! getent group "$GROUP" >/dev/null; then
     echo "group '$GROUP' does not exist; set STRIXCTL_GROUP to one that does" >&2
     exit 1
+fi
+
+# Dependencies first, so this is a prerequisite check rather than a post-mortem.
+# The CLI imports nothing outside the standard library, so missing GTK bindings
+# are a warning and not a failure: 'strixctl status' works either way, and only
+# the window and the tray need them.
+probe_missing() {
+    python3 - <<'PROBE'
+missing = []
+try:
+    import gi
+except Exception:
+    missing.append("python3-gi")
+else:
+    try:
+        gi.require_version("Gtk", "3.0")
+        from gi.repository import Gtk  # noqa: F401
+    except Exception:
+        missing.append("gir1.2-gtk-3.0")
+    try:
+        gi.require_foreign("cairo")
+    except Exception:
+        missing.append("python3-gi-cairo")
+    try:
+        gi.require_version("XApp", "1.0")
+        from gi.repository import XApp  # noqa: F401
+    except Exception:
+        missing.append("gir1.2-xapp-1.0")
+try:
+    import cairo  # noqa: F401
+except Exception:
+    missing.append("python3-cairo")
+print(" ".join(dict.fromkeys(missing)))
+PROBE
+}
+
+MISSING="$(probe_missing)"
+if [ -n "$MISSING" ]; then
+    if [ -n "$WITH_DEPS" ]; then
+        if ! command -v apt-get >/dev/null 2>&1; then
+            echo "--with-deps needs apt-get, which is not on this system." >&2
+            echo "Install these with your own package manager: $MISSING" >&2
+            exit 1
+        fi
+        echo "Installing: $MISSING"
+        apt-get install -y $MISSING
+        MISSING="$(probe_missing)"
+        [ -n "$MISSING" ] && echo "WARNING: still missing after apt: $MISSING"
+    else
+        echo "The window and tray need packages that are not installed:"
+        echo "    $MISSING"
+        echo "  Install them with:"
+        echo "    sudo apt install $MISSING"
+        echo "  Or re-run this script as: sudo ./install.sh --with-deps"
+        echo "  Carrying on regardless. The CLI does not need them."
+        echo
+    fi
 fi
 
 # A hand-rolled charge-limit oneshot writes the same sysfs attribute as

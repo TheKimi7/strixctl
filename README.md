@@ -53,11 +53,26 @@ through repos that half-work and allat. anyway. moving on.)
 
 ## Install
 
+Prerequisites first, because a freshly installed Debian or Ubuntu has none of
+these:
+
+```sh
+sudo apt install python3-gi python3-gi-cairo gir1.2-gtk-3.0 gir1.2-xapp-1.0
+```
+
+Then:
+
 ```sh
 git clone https://github.com/TheKimi7/strixctl
 cd strixctl
 sudo ./install.sh
 ```
+
+Cannot be bothered with the first step? `sudo ./install.sh --with-deps` will
+apt-get the missing ones for you. Either way the installer checks before it
+touches anything and tells you exactly what is absent, so you cannot end up
+with an installed app that refuses to start. What each package is for is in
+[Requirements](#requirements).
 
 **If you already hand-rolled a charge-limit unit, disable it first.** A common
 recipe is a oneshot that echoes a hardcoded value into
@@ -226,6 +241,21 @@ sudo apt install python3-gi python3-gi-cairo gir1.2-gtk-3.0 gir1.2-xapp-1.0
 
 GTK 3 rather than GTK 4 because this targets Cinnamon, whose tray API (XApp) is
 GTK 3 only. Not a hill I chose, just the one I live on.
+
+**There is no `requirements.txt`, on purpose.** pip cannot install any of this.
+`python3-gi` and `python3-cairo` do exist on PyPI, but only as source builds
+wanting a compiler and a pile of `-dev` headers, and the two typelibs are not
+Python packages at all: a GObject typelib is a binary description of a C
+library, and pip has no concept of one. A `requirements.txt` here would be a
+file that looks helpful right up until it fails on a fresh machine, which is
+worse than no file.
+
+The apt line above is the dependency list. You do not have to take my word for
+it either: `install.sh` probes for each piece before it installs anything and
+names exactly what is missing, `sudo ./install.sh --with-deps` fetches them for
+you, and running `strixctl gui` without the bindings tells you what to install
+rather than throwing a traceback at you. The CLI itself needs nothing but the
+standard library, so `strixctl status` works on a box with no GTK at all.
 
 **Optional: [OpenRGB][openrgb]**, needed only for keyboard *colour*. Everything
 else works without it. There is a script, so you never have to think about

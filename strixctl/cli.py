@@ -185,13 +185,39 @@ def cmd_colour(args):
     return 0
 
 
+#: The GUI and tray are the only parts with dependencies beyond the standard
+#: library, and they are system packages rather than anything pip can supply:
+#: a GObject typelib is not a Python package. So they are imported lazily and
+#: the failure is reported in terms of what to install.
+GTK_PACKAGES = "python3-gi python3-gi-cairo gir1.2-gtk-3.0"
+TRAY_PACKAGES = GTK_PACKAGES + " gir1.2-xapp-1.0"
+
+
+def _missing_bindings(what, packages, exc):
+    print(f"{what} needs GTK 3 bindings that are not installed:", file=sys.stderr)
+    print(f"  {exc}", file=sys.stderr)
+    print("On Debian or Ubuntu:", file=sys.stderr)
+    print(f"  sudo apt install {packages}", file=sys.stderr)
+    print("Everything else works without them; try 'strixctl status'.",
+          file=sys.stderr)
+    return 1
+
+
 def cmd_gui(args):
-    from .gui import main as gui_main
+    # ValueError as well as ImportError: a missing typelib fails inside
+    # gi.require_version, not at the import itself.
+    try:
+        from .gui import main as gui_main
+    except (ImportError, ValueError) as exc:
+        return _missing_bindings("The window", GTK_PACKAGES, exc)
     return gui_main()
 
 
 def cmd_tray(args):
-    from .tray import main as tray_main
+    try:
+        from .tray import main as tray_main
+    except (ImportError, ValueError) as exc:
+        return _missing_bindings("The tray icon", TRAY_PACKAGES, exc)
     return tray_main()
 
 
