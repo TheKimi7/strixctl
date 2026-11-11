@@ -115,16 +115,6 @@ class Migrate(unittest.TestCase):
                 hw.FanCurve.validate(cfg.points(prof[key]))
 
 
-class ProfileForPlatform(unittest.TestCase):
-    def test_prefers_the_active_profile(self):
-        conf = copy.deepcopy(cfg.DEFAULTS)
-        conf["profiles"]["Loud"] = {"platform_profile": "balanced"}
-        conf["active_profile"] = "Loud"
-        self.assertEqual(cfg.profile_for_platform(conf, "balanced"), "Loud")
-        self.assertEqual(cfg.profile_for_platform(conf, "quiet"), "Silent")
-        self.assertIsNone(cfg.profile_for_platform(conf, "turbo"))
-
-
 LISTING = """\
 0: ASUS Aura Keyboard
   Type:           Keyboard
@@ -186,6 +176,35 @@ class OpenRGB(unittest.TestCase):
             stdout="Error: Mode 'Nope' not found\n", stderr="", returncode=0)
         with self.assertRaisesRegex(OSError, "Nope"):
             self.backend.set_colors([[0, 0, 255]] * 4, mode="Static")
+
+
+try:
+    from strixctl import gui
+except (ImportError, ValueError):   # no GTK bindings here; the rest still runs
+    gui = None
+
+
+@unittest.skipIf(gui is None, "GTK bindings not installed")
+class CurveEditing(unittest.TestCase):
+    def test_a_point_is_held_between_its_neighbours(self):
+        self.assertEqual(gui.clamp_point(GOOD, 1, 5, 100), (35, 23))
+        self.assertEqual(gui.clamp_point(GOOD, 1, 99, 0), (58, 3))
+
+    def test_the_last_point_only_moves_sideways(self):
+        self.assertEqual(gui.clamp_point(GOOD, 7, 85, 40), (85, 100))
+        self.assertEqual(gui.clamp_point(GOOD, 7, 200, 40), (110, 100))
+
+    def test_every_clamped_drag_still_validates(self):
+        for index in range(len(GOOD)):
+            for temp, percent in ((0, 0), (0, 100), (110, 0), (110, 100)):
+                points = list(GOOD)
+                points[index] = gui.clamp_point(points, index, temp, percent)
+                hw.FanCurve.validate(points)
+
+    def test_speed_is_read_off_the_segments(self):
+        self.assertEqual(gui.speed_at(GOOD, 20), 3)
+        self.assertEqual(gui.speed_at(GOOD, 67), 43)
+        self.assertEqual(gui.speed_at(GOOD, 105), 100)
 
 
 if __name__ == "__main__":

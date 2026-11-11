@@ -7,14 +7,12 @@ Cinnamon desktop -- so this adds nothing to install.
 The tray is also the one long-lived strixctl process, so it does the watching
 that a daemon would otherwise be needed for:
 
-  * The kernel drops a custom fan curve whenever the platform profile changes,
-    including when the firmware's own hotkey changes it. The tray notices,
-    switches to the strixctl profile that goes with the new platform profile,
-    and applies it.
   * A resume from sleep can leave the firmware curve running. The tray notices
     the wake-up and puts the profile's curve back.
   * The window and the CLI edit the same config file, so the menu is rebuilt
     when that file changes.
+
+It never switches profile on its own: only a click does that.
 
 None of it happens when the tray is not running; curves then stay as the last
 `strixctl apply` left them, as before.
@@ -51,12 +49,9 @@ class Tray:
     def __init__(self):
         self.icon = XApp.StatusIcon()
         self.icon.set_icon_name("computer")
-        self.platform = hw.PlatformProfile()
         self._busy = False
         self._note = ""
         self._seen_config = cfg.mtime()
-        self._seen_platform = self.platform.profile
-        self._pending_platform = None
         self._seen_sleep = _slept_for()
         self.refresh()
         GLib.timeout_add_seconds(POLL_SECONDS, self.watch)
@@ -129,9 +124,6 @@ class Tray:
         failures = [f"{knob}: {detail}"
                     for knob, state, detail in results if state == "failed"]
         self._note = ("Last apply failed: " + "; ".join(failures)) if failures else ""
-        # Our own writes are not news to the watcher.
-        self._seen_platform = self.platform.profile
-        self._pending_platform = None
         self.refresh()
         return False
 
@@ -156,9 +148,7 @@ class Tray:
 
     def on_open(self, _item):
         from .gui import StrixWindow
-        window = StrixWindow()
-        window.show_all()
-        window.infobar.set_visible(bool(window._infobar_label.get_text()))
+        StrixWindow().present_all()
 
     # ------------------------------------------------------------- watching
 
@@ -172,37 +162,9 @@ class Tray:
         slept = _slept_for()
         woke = slept - self._seen_sleep > RESUME_JUMP
         self._seen_sleep = slept
-
-        now = self.platform.profile if self.platform.available else None
-        if now != self._seen_platform:
-            # Act on the second sighting, not the first: `strixctl apply` from
-            # another process changes the platform profile a moment before it
-            # arms its curve, and jumping in between would only race it.
-            if self._pending_platform != now:
-                self._pending_platform = now
-                return True
-            self._pending_platform = None
-            self._seen_platform = now
-            self.on_platform_changed(now)
-        elif woke:
+        if woke:
             self._run(apply_mod.rearm_fans, "fans")
         return True
-
-    def on_platform_changed(self, platform):
-        """The platform profile moved without the tray moving it."""
-        conf = cfg.load()
-        active = cfg.profile(conf) or {}
-        if active.get("platform_profile") == platform:
-            # The window or the CLI applied the active profile. Only step in
-            # if that left a curve the profile wants disarmed.
-            fans = hw.Fans()
-            if (active.get("fan_mode") == "curve" and fans.available
-                    and not all(fans.armed.values())):
-                self._run(apply_mod.rearm_fans, "fans")
-            return
-        name = cfg.profile_for_platform(conf, platform)
-        if name is not None:
-            self.switch_to(name)
 
 
 def main():

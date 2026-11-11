@@ -189,17 +189,6 @@ def profile(config, name=None):
     return config["profiles"].get(name)
 
 
-def profile_for_platform(config, platform):
-    """Name of a profile that uses `platform`, preferring the active one."""
-    active = config.get("active_profile")
-    names = [active] + [n for n in config["profiles"] if n != active]
-    for name in names:
-        prof = config["profiles"].get(name)
-        if prof and prof.get("platform_profile") == platform:
-            return name
-    return None
-
-
 def points(raw):
     """Normalise JSON [[t, p], ...] into [(t, p), ...], p in percent."""
     return [(int(t), int(p)) for t, p in raw]

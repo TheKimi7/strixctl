@@ -6,6 +6,8 @@ Linux. A small GTK3 app that talks to the kernel's own sysfs interfaces.
 Built and tested on a **ROG Strix G712LU**, Debian 13 (trixie), kernel 6.12,
 Cinnamon. Sample size: one laptop. Mine.
 
+![the home page](docs/home.png)
+
 ![the fan page](docs/fans.png)
 
 ![the keyboard page](docs/keyboard.png)
@@ -309,28 +311,43 @@ A config from before that was true (0-255 values, no `"version"` key) is
 converted the first time it is loaded, and the original is kept next to it as
 `config.v1.json`.
 
+## The window
+
+The profile buttons across the top are the main control: click one and that
+profile is switched to and applied, same as the tray. Everything below edits
+the profile that is selected, and nothing you edit touches the machine until
+you press Apply. Apply and Revert only light up when there is something
+unapplied, so there is no guessing whether you saved.
+
+Home shows what the machine is doing right now (CPU temperature, both fans,
+the keyboard) and holds the two things that are not a curve or a colour: the
+profile's power mode, and the charge limit. The charge limit belongs to the
+machine and not to a profile, so it takes effect the moment you pick it.
+
 ## Editing a curve
 
-Drag the control points on the graph, or type into the spin buttons. They are
-two views of the same numbers, so either updates the other. Dragging is
-constrained to the set of curves that pass validation, so a shape you can draw
-is always a shape that will apply: each point is held between its neighbours,
-and the last point stays at 100% and only moves sideways.
+On the Fans page, pick "My curve", pick which fan, and drag its points on the
+graph. "Edit as numbers" opens the same eight points as boxes you can type
+into; the two are views of the same numbers, so either updates the other.
+Dragging is constrained to the set of curves that pass validation, so a shape
+you can draw is always a shape that will apply: each point is held between
+its neighbours, and the last point stays at 100% and only moves sideways.
 
 Speeds are percent of full, which is also what the firmware works in. The
 kernel exposes them as 0-255 and truncates on the way in and on the way out,
 so a curve read back and written again used to lose 1% a point; strixctl
 rounds so that the percent you type is the percent the firmware gets.
 
-The line above the graph shows the CPU temperature, both fan speeds and
-whether a custom or the firmware curve is running, and the dashed marker on
-the graph is where the CPU is right now. If you ever doubt that a curve is
-doing anything, `strixctl fans test` holds the fans at 40% and then 75% and
-checks that the speeds follow.
+The graph carries the live readings: both fan speeds in the legend, a dashed
+line at the CPU's temperature, and a ringed dot on each curve where that fan
+sits right now. With "Firmware decides" selected it shows the firmware's own
+curve, read from the machine. If you ever doubt that a curve is doing
+anything, `strixctl fans test` holds the fans at 40% and then 75% and checks
+that the speeds follow.
 
-"Load firmware curve" reads the firmware's real curve for the platform profile
-the machine is in. Balanced tops out at 83% on this chassis, so loading it
-raises the last point to 100% and says so.
+"Start from the firmware curve" copies the firmware's real curve for the power
+mode the machine is in. Balanced tops out at 83% on this chassis, so the last
+point is raised to 100% and the window says so.
 
 The UI will not let you draw something the validator then rejects, because being
 told "no" after the fact is deeply annoying.
@@ -343,22 +360,20 @@ governs every temperature above it, so whatever a curve does lower down, the
 fans can still go flat out when it gets hot. Your laptop is not a space heater
 and I would like it to stay that way.
 
-"Hand back to firmware" (`pwm*_enable = 3`, which also reloads the firmware's
-curve for the current platform profile) is one click away in the window, one
-item in the tray menu, and `strixctl fans reset` on the command line. Three
-escape hatches, because fans are the one thing here that can actually cook
-something.
+Handing the fans back to the firmware (`pwm*_enable = 3`, which also reloads
+the firmware's curve for the current platform profile) is "Firmware decides"
+plus Apply in the window, one item in the tray menu, and `strixctl fans reset`
+on the command line. Three escape hatches, because fans are the one thing here
+that can actually cook something.
 
 Switching the platform profile makes the firmware reload its own curve, so
 strixctl re-arms a custom curve immediately afterwards. That ordering matters:
 applying the curve first and the profile second silently loses the curve, which
 is a genuinely infuriating bug to chase.
 
-The same thing happens when something other than strixctl changes the platform
-profile, the firmware's own hotkey included. The tray watches for that: it
-switches to the strixctl profile that goes with the new platform profile and
-applies it, and it puts the curve back after a resume from sleep. That only
-works while the tray is running, because there is still no daemon.
+A resume from sleep can lose the curve the same way, so the tray puts it back
+when the machine wakes. That only works while the tray is running, because
+there is still no daemon. The tray never switches profile on its own.
 
 ## Known gaps
 
@@ -366,8 +381,8 @@ works while the tray is running, because there is still no daemon.
   tells you rather than just greying out and sulking.
 - Each colour change spawns OpenRGB (~2s). If that ever matters, OpenRGB's CLI
   can talk to its own running server with `--client localhost:6742`.
-- Re-arming after a resume or a hotkey profile change is the tray's job. Without
-  the tray running, run `strixctl apply` yourself.
+- Re-arming after a resume is the tray's job. Without the tray running, run
+  `strixctl apply` yourself.
 - CPU TDP tuning needs the `asus-armoury` driver, mainline only from 6.19. So
   that is a "later" problem.
 - Tested on exactly one laptop. The backends probe rather than assume, so other
