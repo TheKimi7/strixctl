@@ -109,12 +109,18 @@ Uninstall with `sudo ./install.sh --uninstall`. No hard feelings.
 | Battery charge limit | `BAT*/charge_control_end_threshold` | works |
 | Platform profile | `/sys/firmware/acpi/platform_profile` | works |
 | Fan curves, 8 points × 2 fans | `asus_custom_fan_curve` hwmon | works |
-| Keyboard brightness | `asus::kbd_backlight` | works |
+| Fan speeds and CPU temperature | `asus` and `coretemp` hwmon | read-only |
 | Keyboard colour: 4 zones, 5 effects, speed | OpenRGB CLI to N-KEY `0b05:1866` | works, needs OpenRGB |
 
-Profiles bundle the platform profile, both fan curves, keyboard brightness and a
-colour, and switch together from the window or the tray. One click, whole vibe
+Profiles bundle the platform profile, both fan curves and a keyboard colour,
+and switch together from the window or the tray. One click, whole vibe
 changes.
+
+Keyboard **brightness** is not on that list, on purpose. Your desktop already
+has a control for it (the Fn keys and the power applet, by way of UPower), and
+two controls for one knob only ever disagree. strixctl reads the level the
+desktop holds and sends colour changes at that level, and otherwise keeps its
+hands off.
 
 ### Keyboard colour goes through OpenRGB
 
@@ -221,7 +227,6 @@ than refusing to start:
 | Battery charge limit | `BAT*/charge_control_end_threshold` |
 | Platform profile | `/sys/firmware/acpi/platform_profile` |
 | Fan curves | an `asus_custom_fan_curve` hwmon |
-| Keyboard brightness | an `asus::kbd_backlight` LED |
 | Keyboard colour | an ASUS N-KEY USB device, plus OpenRGB |
 
 **Runtime.** Python 3 and the GTK 3 introspection bindings. Nothing from PyPI,
@@ -290,6 +295,8 @@ strixctl tray            # tray icon
 strixctl battery 80      # charge limit; 'off' clears it back to 100%
 strixctl profile Silent  # switch and apply
 strixctl fans reset      # hand both fans back to the firmware curve
+strixctl fans test       # prove a custom curve actually moves the fans (~1 min)
+strixctl fans watch      # live temperature and fan speeds, Ctrl-C to stop
 strixctl colour ff0000   # all four zones red
 strixctl colour ff0000 ff3c00 ff7800 ffb400 --save   # per zone, stored in the profile
 strixctl colour list     # what OpenRGB sees
@@ -297,7 +304,10 @@ strixctl colour list     # what OpenRGB sees
 
 `strixctl status` is the one to run first, and the one to paste into an issue.
 
-Config lives in `~/.config/strixctl/config.json`.
+Config lives in `~/.config/strixctl/config.json`. Fan speeds in it are percent.
+A config from before that was true (0-255 values, no `"version"` key) is
+converted the first time it is loaded, and the original is kept next to it as
+`config.v1.json`.
 
 ## Editing a curve
 
@@ -305,19 +315,36 @@ Drag the control points on the graph, or type into the spin buttons. They are
 two views of the same numbers, so either updates the other. Dragging is
 constrained to the set of curves that pass validation, so a shape you can draw
 is always a shape that will apply: each point is held between its neighbours,
-and the last point cannot fall below the safety floor drawn as a dashed line.
+and the last point stays at 100% and only moves sideways.
+
+Speeds are percent of full, which is also what the firmware works in. The
+kernel exposes them as 0-255 and truncates on the way in and on the way out,
+so a curve read back and written again used to lose 1% a point; strixctl
+rounds so that the percent you type is the percent the firmware gets.
+
+The line above the graph shows the CPU temperature, both fan speeds and
+whether a custom or the firmware curve is running, and the dashed marker on
+the graph is where the CPU is right now. If you ever doubt that a curve is
+doing anything, `strixctl fans test` holds the fans at 40% and then 75% and
+checks that the speeds follow.
+
+"Load firmware curve" reads the firmware's real curve for the platform profile
+the machine is in. Balanced tops out at 83% on this chassis, so loading it
+raises the last point to 100% and says so.
 
 The UI will not let you draw something the validator then rejects, because being
 told "no" after the fact is deeply annoying.
 
 ## Fan curve safety
 
-Custom curves are validated before they are armed: temperatures and PWM values
-must be non-decreasing, and a curve asking for under 128/255 at 85 °C or above is
-rejected. Your laptop is not a space heater and I would like it to stay that
-way.
+Custom curves are validated before they are armed: temperatures and speeds
+must be non-decreasing, and the last point has to be 100%. The last point
+governs every temperature above it, so whatever a curve does lower down, the
+fans can still go flat out when it gets hot. Your laptop is not a space heater
+and I would like it to stay that way.
 
-"Hand back to firmware" (`pwm*_enable = 2`) is one click away in the window, one
+"Hand back to firmware" (`pwm*_enable = 3`, which also reloads the firmware's
+curve for the current platform profile) is one click away in the window, one
 item in the tray menu, and `strixctl fans reset` on the command line. Three
 escape hatches, because fans are the one thing here that can actually cook
 something.
@@ -327,14 +354,20 @@ strixctl re-arms a custom curve immediately afterwards. That ordering matters:
 applying the curve first and the profile second silently loses the curve, which
 is a genuinely infuriating bug to chase.
 
+The same thing happens when something other than strixctl changes the platform
+profile, the firmware's own hotkey included. The tray watches for that: it
+switches to the strixctl profile that goes with the new platform profile and
+applies it, and it puts the curve back after a resume from sleep. That only
+works while the tray is running, because there is still no daemon.
+
 ## Known gaps
 
 - Keyboard colour needs OpenRGB installed. Not a hard dependency, and the UI
   tells you rather than just greying out and sulking.
 - Each colour change spawns OpenRGB (~2s). If that ever matters, OpenRGB's CLI
   can talk to its own running server with `--client localhost:6742`.
-- No re-apply after suspend/resume. The EC normally keeps its state; if yours
-  does not, run `strixctl apply` from the tray.
+- Re-arming after a resume or a hotkey profile change is the tray's job. Without
+  the tray running, run `strixctl apply` yourself.
 - CPU TDP tuning needs the `asus-armoury` driver, mainline only from 6.19. So
   that is a "later" problem.
 - Tested on exactly one laptop. The backends probe rather than assume, so other

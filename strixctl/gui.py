@@ -4,7 +4,13 @@ GTK3 rather than GTK4 because this targets Cinnamon, which is GTK3 native and
 whose tray API (XApp) is GTK3 only.  Nothing here needs root: every write goes
 to an attribute udev has already handed to the users group, so an unwritable
 knob is a UI state to render, not an exception to catch.
+
+Anything that runs OpenRGB goes through StrixWindow._in_background: one call
+takes a couple of seconds and may take thirty, which is far too long to hold
+the GTK main loop.
 """
+
+import threading
 
 import gi
 
@@ -13,7 +19,7 @@ import gi
 # then collides with Gtk 3.0.
 gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
-from gi.repository import Gdk, Gtk
+from gi.repository import Gdk, GLib, Gtk
 
 from . import apply as apply_mod
 from . import aura as aura_mod
@@ -43,6 +49,7 @@ class CurvePlot(Gtk.DrawingArea):
         self.editable = True
         self._drag = None      # (fan, index) held for the whole gesture
         self._hover = None
+        self.temp_now = None   # CPU temperature, drawn as a marker
         self.set_size_request(-1, 200)
 
         # A DrawingArea has an empty event mask by default: without this the
@@ -61,6 +68,11 @@ class CurvePlot(Gtk.DrawingArea):
         self.curves = curves
         self.queue_draw()
 
+    def set_temperature(self, temp):
+        if temp != self.temp_now:
+            self.temp_now = temp
+            self.queue_draw()
+
     def set_editable(self, editable):
         self.editable = editable
         self._drag = self._hover = None
@@ -77,13 +89,13 @@ class CurvePlot(Gtk.DrawingArea):
         left, top, width, height = self._plot_area()
         temp = max(TEMP_MIN, min(TEMP_MAX, temp))
         x = left + width * (temp - TEMP_MIN) / (TEMP_MAX - TEMP_MIN)
-        y = top + height * (1 - pwm / 255)
+        y = top + height * (1 - pwm / 100)
         return x, y
 
     def _from_xy(self, x, y):
         left, top, width, height = self._plot_area()
         temp = TEMP_MIN + (TEMP_MAX - TEMP_MIN) * (x - left) / max(width, 1)
-        pwm = 255 * (1 - (y - top) / max(height, 1))
+        pwm = 100 * (1 - (y - top) / max(height, 1))
         return int(round(temp)), int(round(pwm))
 
     def _nearest(self, x, y):
@@ -103,7 +115,7 @@ class CurvePlot(Gtk.DrawingArea):
         if not self.editable or event.button != 1:
             return False
         # Resolve the grabbed point once and hold it: stock curves contain
-        # duplicate coordinates (80:211 twice on CPU, 35:38 twice on GPU), so
+        # duplicate coordinates (80C:83% twice on CPU, 35C:15% twice on GPU), so
         # re-resolving on every motion event could hop between them mid-drag.
         self._drag = self._nearest(event.x, event.y)
         return self._drag is not None
@@ -148,16 +160,16 @@ class CurvePlot(Gtk.DrawingArea):
         low_t = points[index - 1][0] if index > 0 else 0
         high_t = points[index + 1][0] if index + 1 < len(points) else 110
         low_p = points[index - 1][1] if index > 0 else 0
-        high_p = points[index + 1][1] if index + 1 < len(points) else 255
+        high_p = points[index + 1][1] if index + 1 < len(points) else 100
 
         temp = max(low_t, min(high_t, temp))
         pwm = max(low_p, min(high_p, pwm))
 
         # Points are non-decreasing, so the last one is the curve's ceiling and
         # the only thing standing between the machine and a curve that cannot
-        # cool it. Hold it at or above the safety floor.
+        # cool it. It moves sideways only: its speed stays at full.
         if index == len(points) - 1:
-            pwm = max(pwm, hw.FanCurve.SAFETY_PWM)
+            pwm = hw.FanCurve.CEILING
         return temp, pwm
 
     # ------------------------------------------------------------- painting
@@ -175,16 +187,19 @@ class CurvePlot(Gtk.DrawingArea):
             cr.line_to(left + width, y)
         cr.stroke()
 
-        # The safety floor, so the limit on how far a point can be dragged is
-        # visible rather than just felt.
-        if self.editable:
-            floor_y = top + height * (1 - hw.FanCurve.SAFETY_PWM / 255)
-            cr.set_source_rgba(0.9, 0.3, 0.3, 0.35)
+        # Where the CPU is right now, so the curve can be read against it.
+        if self.temp_now is not None and TEMP_MIN <= self.temp_now <= TEMP_MAX:
+            x, _y = self._to_xy(self.temp_now, 0)
+            cr.set_source_rgba(fg.red, fg.green, fg.blue, 0.45)
             cr.set_dash([4, 4])
-            cr.move_to(left, floor_y)
-            cr.line_to(left + width, floor_y)
+            cr.move_to(x, top)
+            cr.line_to(x, top + height)
             cr.stroke()
             cr.set_dash([])
+            cr.select_font_face("Sans")
+            cr.set_font_size(10)
+            cr.move_to(x + 4, top + 10)
+            cr.show_text(f"{self.temp_now}\u00b0C now")
 
         for fan, points in self.curves.items():
             if not points:
@@ -210,13 +225,16 @@ class CurvePlot(Gtk.DrawingArea):
         cr.move_to(left + width - 30, top + height + 16)
         cr.show_text(f"{TEMP_MAX}\u00b0C")
         cr.move_to(4, top + 4)
-        cr.show_text("255")
+        cr.show_text("100%")
         cr.move_to(8, top + height)
-        cr.show_text("0")
+        cr.show_text("0%")
 
 
 class FanEditor(Gtk.Grid):
-    """Eight (temperature, pwm) spin-button rows for one fan."""
+    """Eight (temperature, percent) spin-button rows for one fan.
+
+    The last row's speed is pinned at 100%: see hw.FanCurve.CEILING.
+    """
 
     def __init__(self, fan, on_change):
         super().__init__(column_spacing=8, row_spacing=4)
@@ -227,7 +245,7 @@ class FanEditor(Gtk.Grid):
         header = Gtk.Label(xalign=0)
         header.set_markup(f"<b>{fan.upper()} fan</b>")
         self.attach(header, 0, 0, 3, 1)
-        for label, column in (("°C", 1), ("PWM", 2)):
+        for label, column in (("°C", 1), ("%", 2)):
             heading = Gtk.Label(label=label)
             heading.get_style_context().add_class("dim-label")
             self.attach(heading, column, 1, 1, 1)
@@ -235,11 +253,13 @@ class FanEditor(Gtk.Grid):
         for index in range(8):
             self.attach(Gtk.Label(label=f"{index + 1}", xalign=1), 0, index + 2, 1, 1)
             temp = Gtk.SpinButton.new_with_range(0, 110, 1)
-            pwm = Gtk.SpinButton.new_with_range(0, 255, 1)
+            pwm = Gtk.SpinButton.new_with_range(0, 100, 1)
             for spin, column in ((temp, 1), (pwm, 2)):
                 spin.connect("value-changed", lambda *_: self.on_change())
                 self.attach(spin, column, index + 2, 1, 1)
             self.rows.append((temp, pwm))
+        self.rows[-1][1].set_tooltip_text(
+            "Fixed at 100% so the fans can always reach full speed.")
 
     def set_points(self, points):
         for (temp_spin, pwm_spin), (temp, pwm) in zip(self.rows, points):
@@ -253,6 +273,7 @@ class FanEditor(Gtk.Grid):
         for temp_spin, pwm_spin in self.rows:
             temp_spin.set_sensitive(sensitive)
             pwm_spin.set_sensitive(sensitive)
+        self.rows[-1][1].set_sensitive(False)
 
 
 class ZoneSwatch(Gtk.ToggleButton):
@@ -307,6 +328,10 @@ class StrixWindow(Gtk.Window):
         self.platform = hw.PlatformProfile()
         self.fans = hw.Fans()
         self.kbd = hw.KeyboardBacklight()
+        self.sensors = hw.Sensors()
+        self._alive = True
+        self._aura_ready = False
+        self.connect("destroy", self._on_destroy)
         # True for the whole of construction: the page builders prime widgets,
         # and a primed widget must not write to hardware or touch self.status.
         self._loading = True
@@ -333,6 +358,68 @@ class StrixWindow(Gtk.Window):
         outer.pack_start(self.status, False, False, 0)
 
         self.load_profile_into_widgets()
+        if cfg.warnings:
+            self.set_status(" ".join(cfg.warnings))
+
+        self._tick()
+        GLib.timeout_add_seconds(2, self._tick)
+        if self.aura.available:
+            self._in_background(self.aura.list_devices, self._aura_probed)
+        else:
+            self._aura_probed(None, None)
+
+    def _on_destroy(self, _window):
+        self._alive = False
+
+    def _in_background(self, work, done):
+        """Run `work()` off the main loop, then `done(result, error)` on it."""
+        def runner():
+            try:
+                result, error = work(), None
+            except Exception as exc:  # reported through `done`, not swallowed
+                result, error = None, exc
+
+            def finish():
+                if self._alive:
+                    done(result, error)
+                return False
+            GLib.idle_add(finish)
+        threading.Thread(target=runner, daemon=True).start()
+
+    def _set_busy(self, busy):
+        for button in (self.apply_button, self.save_button, self.preview_button):
+            button.set_sensitive(not busy)
+
+    def _tick(self):
+        """Refresh the live readings. Returns False once the window is gone."""
+        if not self._alive:
+            return False
+        if self.fans.available:
+            temp, rpm = self.sensors.cpu_temp(), self.sensors.rpm()
+            armed = self.fans.armed
+            bits = []
+            if temp is not None:
+                bits.append(f"CPU {temp}\u00b0C")
+            for fan in ("cpu", "gpu"):
+                if rpm.get(fan) is not None:
+                    bits.append(f"{fan.upper()} fan {rpm[fan]} rpm")
+            if all(armed.values()):
+                bits.append("custom curve running")
+            elif not any(armed.values()):
+                bits.append("firmware curve running")
+            else:
+                bits.append("mixed: " + ", ".join(
+                    f"{fan} {'custom' if on else 'firmware'}"
+                    for fan, on in armed.items()))
+            self.telemetry.set_text("     ".join(bits))
+            self.plot.set_temperature(temp)
+        if self.kbd.available:
+            self.kbd_note.set_text(
+                "Brightness follows the desktop: use the keyboard's own keys "
+                "or the power applet. It is at "
+                f"{self.kbd.brightness} of {self.kbd.max_brightness} now, and "
+                "colour changes are sent at that level.")
+        return True
 
     # ------------------------------------------------------------------ chrome
 
@@ -347,7 +434,7 @@ class StrixWindow(Gtk.Window):
 
         readonly = [name for name, backend in (
             ("battery", self.battery), ("platform profile", self.platform),
-            ("fan curves", self.fans), ("keyboard", self.kbd))
+            ("fan curves", self.fans))
             if backend.available and not backend.writable]
         if readonly:
             label.set_text(
@@ -371,9 +458,9 @@ class StrixWindow(Gtk.Window):
         self.profile_combo.connect("changed", self.on_profile_changed)
         box.pack_start(self.profile_combo, False, False, 0)
 
-        save = Gtk.Button(label="Save")
+        save = self.save_button = Gtk.Button(label="Save")
         save.connect("clicked", self.on_save)
-        apply_button = Gtk.Button(label="Apply")
+        apply_button = self.apply_button = Gtk.Button(label="Apply")
         apply_button.get_style_context().add_class("suggested-action")
         apply_button.connect("clicked", self.on_apply)
         box.pack_end(apply_button, False, False, 0)
@@ -398,12 +485,11 @@ class StrixWindow(Gtk.Window):
             self.platform_combo = Gtk.ComboBoxText()
             for choice in self.platform.choices:
                 self.platform_combo.append_text(choice)
-            self.platform_combo.connect("changed", self.on_platform_changed)
             self.platform_combo.set_sensitive(self.platform.writable)
             row.pack_start(self.platform_combo, False, False, 0)
             note = Gtk.Label(xalign=0)
             note.get_style_context().add_class("dim-label")
-            note.set_text("switching this reloads the firmware curve")
+            note.set_text("takes effect on Apply, with the rest of the profile")
             row.pack_start(note, False, False, 0)
             page.pack_start(row, False, False, 0)
 
@@ -411,13 +497,17 @@ class StrixWindow(Gtk.Window):
         self.fan_mode.connect("toggled", self.on_fan_mode_toggled)
         page.pack_start(self.fan_mode, False, False, 0)
 
+        self.telemetry = Gtk.Label(xalign=0)
+        page.pack_start(self.telemetry, False, False, 0)
+
         self.plot = CurvePlot(on_point_moved=self.on_point_dragged)
         page.pack_start(self.plot, False, False, 0)
 
         hint = Gtk.Label(xalign=0)
         hint.get_style_context().add_class("dim-label")
-        hint.set_text("Drag a point to reshape the curve. The dashed line is the "
-                      "safety floor: the last point cannot go below it.")
+        hint.set_text("Drag a point to reshape the curve. Speeds are percent of "
+                      "full. The last point is fixed at 100%, so the fans can "
+                      "always reach full speed; it only moves sideways.")
         hint.set_line_wrap(True)
         page.pack_start(hint, False, False, 0)
 
@@ -443,23 +533,14 @@ class StrixWindow(Gtk.Window):
         page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
         page.set_border_width(12)
 
+        # No brightness control here, on purpose: the desktop already has one
+        # and two controls for one knob only ever disagree.
+        self.kbd_note = Gtk.Label(xalign=0)
+        self.kbd_note.set_line_wrap(True)
+        self.kbd_note.get_style_context().add_class("dim-label")
         if self.kbd.available:
-            row = Gtk.Box(spacing=12)
-            row.pack_start(Gtk.Label(label="Brightness"), False, False, 0)
-            self.kbd_scale = Gtk.Scale.new_with_range(
-                Gtk.Orientation.HORIZONTAL, 0, self.kbd.max_brightness, 1)
-            self.kbd_scale.set_digits(0)
-            for level in range(self.kbd.max_brightness + 1):
-                self.kbd_scale.add_mark(level, Gtk.PositionType.BOTTOM, str(level))
-            self.kbd_scale.connect("value-changed", self.on_kbd_brightness)
-            self.kbd_scale.set_sensitive(self.kbd.writable)
-            row.pack_start(self.kbd_scale, True, True, 0)
-            page.pack_start(row, False, False, 0)
-        else:
-            page.pack_start(self._unavailable("No asus::kbd_backlight LED."),
-                            False, False, 0)
-
-        page.pack_start(Gtk.Separator(), False, False, 6)
+            page.pack_start(self.kbd_note, False, False, 0)
+            page.pack_start(Gtk.Separator(), False, False, 6)
 
         self.aura = aura_mod.Aura(settings=self.config.get("openrgb"))
         header = Gtk.Label(xalign=0)
@@ -469,7 +550,11 @@ class StrixWindow(Gtk.Window):
         effect_row = Gtk.Box(spacing=8)
         effect_row.pack_start(Gtk.Label(label="Effect"), False, False, 0)
         self.effect_combo = Gtk.ComboBoxText()
-        for mode in (self.aura.modes if self.aura.available else ["Static"]):
+        # The full menu for now; _aura_probed trims it to what the hardware
+        # reports once OpenRGB has answered.
+        self._modes = ([name for name, _role in aura_mod.MODES]
+                       if self.aura.available else ["Static"])
+        for mode in self._modes:
             self.effect_combo.append_text(mode)
         self.effect_combo.connect("changed", self.on_effect_changed)
         effect_row.pack_start(self.effect_combo, False, False, 0)
@@ -510,33 +595,55 @@ class StrixWindow(Gtk.Window):
         actions = Gtk.Box(spacing=8)
         all_zones = Gtk.Button(label="Set all zones to zone 1")
         all_zones.connect("clicked", self.on_match_zones)
-        preview = Gtk.Button(label="Preview on keyboard")
+        preview = self.preview_button = Gtk.Button(label="Preview on keyboard")
         preview.connect("clicked", self.on_preview_colour)
         actions.pack_start(all_zones, False, False, 0)
         actions.pack_start(preview, False, False, 0)
         page.pack_start(actions, False, False, 0)
 
-        note = Gtk.Label(xalign=0)
+        note = self.aura_note = Gtk.Label(xalign=0)
         note.set_line_wrap(True)
         note.get_style_context().add_class("dim-label")
-        if self.aura.available:
-            device = self.aura.find_keyboard()
-            if device is not None:
-                note.set_text(
-                    f"Driven through OpenRGB ({self.aura.binary}): "
-                    f"{device.name}, {device.leds} zones on {device.location}. "
-                    "Each change spawns OpenRGB, so it takes a couple of seconds.")
-            else:
-                note.set_text(self.aura.why_unavailable())
-        else:
-            note.set_text(
+        note.set_text("Asking OpenRGB what it can see\u2026")
+        page.pack_start(note, False, False, 0)
+        return page
+
+    def _aura_probed(self, _devices, error):
+        """OpenRGB has listed its devices (or is absent): finish the page."""
+        self._aura_ready = True
+        if not self.aura.available:
+            self.aura_note.set_text(
                 "Keyboard colour needs OpenRGB, which was not found.\n\n"
                 "This chassis exposes no colour attribute in sysfs, so colour "
                 "means HID writes to the N-KEY device, and strixctl hands that job "
                 "to OpenRGB rather than reimplementing it.\n\n"
                 + self.aura.why_unavailable())
-        page.pack_start(note, False, False, 0)
-        return page
+        elif error is not None:
+            self.aura_note.set_text(f"OpenRGB failed: {error}")
+        else:
+            device = self.aura.find_keyboard()
+            if device is not None:
+                self.aura_note.set_text(
+                    f"Driven through OpenRGB ({self.aura.binary}): "
+                    f"{device.name}, {device.leds} zones on {device.location}. "
+                    "Each change spawns OpenRGB, so it takes a couple of seconds.")
+            else:
+                self.aura_note.set_text(self.aura.why_unavailable())
+
+        modes = (self.aura.modes if self.aura.available else None) or ["Static"]
+        if modes != self._modes:
+            wanted = self.effect_combo.get_active_text()
+            previous, self._loading = self._loading, True
+            try:
+                self._modes = modes
+                self.effect_combo.remove_all()
+                for mode in modes:
+                    self.effect_combo.append_text(mode)
+                self.effect_combo.set_active(
+                    modes.index(wanted) if wanted in modes else 0)
+            finally:
+                self._loading = previous
+        self.sync_effect_sensitivity()
 
     def _build_battery_page(self):
         page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
@@ -599,14 +706,12 @@ class StrixWindow(Gtk.Window):
             for fan, editor in self.fan_editors.items():
                 editor.set_points(cfg.points(prof.get(f"fan_{fan}", [])))
             self.on_fan_mode_toggled(self.fan_mode)
-        if self.kbd.available:
-            self.kbd_scale.set_value(prof.get("kbd_brightness", self.kbd.brightness))
         settings = prof.get("aura", {})
         self.zone_colours = [list(colour) for colour
                              in aura_mod.normalise_colors(settings, cfg.ZONES)]
         self._refresh_zone_swatches()
         self.select_zone(self.active_zone)
-        modes = [m for m in (self.aura.modes or ["Static"])]
+        modes = self._modes
         wanted = settings.get("mode", "Static")
         self.effect_combo.set_active(modes.index(wanted) if wanted in modes else 0)
         self.speed_scale.set_value(settings.get("speed", 50))
@@ -622,27 +727,6 @@ class StrixWindow(Gtk.Window):
     def on_profile_changed(self, _combo):
         self.config["active_profile"] = self.profile_combo.get_active_text()
         self.load_profile_into_widgets()
-
-    def on_platform_changed(self, combo):
-        if self._loading or not self.platform.writable:
-            return
-        choice = combo.get_active_text()
-        try:
-            self.platform.profile = choice
-        except (OSError, ValueError) as exc:
-            self.set_status(f"Could not switch platform profile: {exc}")
-            return
-        # The firmware reloads its own curve on a profile switch, so a custom
-        # curve has to be re-armed afterwards or it silently stops applying.
-        if self.fans.available and self.fan_mode.get_active() and self.fans.writable:
-            try:
-                for fan, editor in self.fan_editors.items():
-                    getattr(self.fans, fan).apply(editor.get_points())
-                self.set_status(f"Platform profile {choice}; custom curve re-armed.")
-            except (OSError, ValueError) as exc:
-                self.set_status(f"Platform profile {choice}, but re-arming failed: {exc}")
-        else:
-            self.set_status(f"Platform profile {choice}.")
 
     def on_point_dragged(self, fan, index, temp, pwm):
         """Write a drag back into the spin buttons, which drive the redraw."""
@@ -661,9 +745,29 @@ class StrixWindow(Gtk.Window):
         self.plot.set_editable(custom and self.fans.writable)
 
     def on_load_stock(self, _button):
+        """Seed the editors with the firmware's curve for the profile in force."""
+        try:
+            curves = self.fans.factory_curves()
+        except (OSError, ValueError) as exc:
+            self.set_status(f"Could not read the firmware curve: {exc}")
+            return
+        raised = False
         for fan, editor in self.fan_editors.items():
-            editor.set_points(self.fans.curves()[fan])
+            fixed = hw.with_full_ceiling(curves[fan])
+            raised = raised or fixed != curves[fan]
+            editor.set_points(fixed)
         self.refresh_plot()
+        running = self.platform.profile if self.platform.available else "current"
+        text = f"Loaded the firmware's {running} curve."
+        if raised:
+            text += (" It stops short of full speed, so the last point was "
+                     "raised to 100%.")
+        chosen = (self.platform_combo.get_active_text()
+                  if self.platform.available else None)
+        if chosen and chosen != running:
+            text += (f" This profile is set to {chosen}, which is not what "
+                     "the machine is running yet.")
+        self.set_status(text)
 
     def on_fan_reset(self, _button):
         try:
@@ -671,14 +775,6 @@ class StrixWindow(Gtk.Window):
             self.set_status("Both fans handed back to the firmware curve.")
         except OSError as exc:
             self.set_status(f"Could not reset fans: {exc}")
-
-    def on_kbd_brightness(self, scale):
-        if self._loading or not self.kbd.writable:
-            return
-        try:
-            self.kbd.brightness = int(scale.get_value())
-        except OSError as exc:
-            self.set_status(f"Could not set brightness: {exc}")
 
     def _zone_colours(self):
         return [list(colour) for colour in self.zone_colours]
@@ -690,7 +786,9 @@ class StrixWindow(Gtk.Window):
     def sync_effect_sensitivity(self):
         """Grey out what the chosen effect ignores, the way Aura Core does."""
         mode = self.effect_combo.get_active_text() or "Static"
-        usable = self.aura.available and self.aura.device_for(mode) is not None
+        # Until the probe has answered, asking would block on OpenRGB.
+        usable = self.aura.available and (
+            not self._aura_ready or self.aura.device_for(mode) is not None)
         takes_colour = aura_mod.mode_takes_color(mode)
         # Effects served by the per-key entry take one colour for the whole
         # board, so the zones past the first have nothing to say.
@@ -773,14 +871,21 @@ class StrixWindow(Gtk.Window):
 
     def on_preview_colour(self, _button):
         """Push the current swatches to the keyboard without saving them."""
-        try:
-            self.aura.set_colors(self._zone_colours(),
-                                 mode=self.effect_combo.get_active_text(),
-                                 speed=int(self.speed_scale.get_value()))
-            self.set_status(f"Sent {self.effect_combo.get_active_text()} "
-                            "to the keyboard.")
-        except OSError as exc:
-            self.set_status(f"Could not set colour: {exc}")
+        colours = self._zone_colours()
+        mode = self.effect_combo.get_active_text()
+        speed = int(self.speed_scale.get_value())
+
+        def done(_device, error):
+            self._set_busy(False)
+            if error is not None:
+                self.set_status(f"Could not set colour: {error}")
+            else:
+                self.set_status(f"Sent {mode} to the keyboard.")
+
+        self._set_busy(True)
+        self.set_status(f"Sending {mode} to the keyboard\u2026")
+        self._in_background(
+            lambda: self.aura.set_colors(colours, mode=mode, speed=speed), done)
 
     def on_battery_toggled(self, button):
         self.battery_scale.set_sensitive(button.get_active() and self.battery.writable)
@@ -813,8 +918,6 @@ class StrixWindow(Gtk.Window):
             prof["fan_mode"] = "curve" if self.fan_mode.get_active() else "auto"
             for fan, editor in self.fan_editors.items():
                 prof[f"fan_{fan}"] = [list(point) for point in editor.get_points()]
-        if self.kbd.available:
-            prof["kbd_brightness"] = int(self.kbd_scale.get_value())
         aura_settings = prof.setdefault("aura", {})
         aura_settings["colors"] = self._zone_colours()
         aura_settings["mode"] = self.effect_combo.get_active_text() or "Static"
@@ -827,15 +930,26 @@ class StrixWindow(Gtk.Window):
 
     def on_apply(self, _button):
         cfg.save(self.collect())
-        results = apply_mod.apply_all(self.profile_combo.get_active_text())
-        failures = [f"{knob}: {detail}"
-                    for knob, state, detail in results if state == "failed"]
-        if failures:
-            self.set_status("Applied with problems: " + "; ".join(failures))
-        else:
-            applied = [knob for knob, state, _ in results if state == "ok"]
-            self.set_status("Applied: " + ", ".join(applied) if applied
-                            else "Nothing to apply.")
+        name = self.profile_combo.get_active_text()
+
+        def done(results, error):
+            self._set_busy(False)
+            if error is not None:
+                self.set_status(f"Apply failed: {error}")
+                return
+            failures = [f"{knob}: {detail}"
+                        for knob, state, detail in results if state == "failed"]
+            if failures:
+                self.set_status("Applied with problems: " + "; ".join(failures))
+            else:
+                applied = [knob for knob, state, _ in results if state == "ok"]
+                self.set_status("Applied: " + ", ".join(applied) if applied
+                                else "Nothing to apply.")
+            self._tick()
+
+        self._set_busy(True)
+        self.set_status(f"Applying {name}\u2026")
+        self._in_background(lambda: apply_mod.apply_all(name), done)
 
     def set_status(self, text):
         self.status.set_text(text)

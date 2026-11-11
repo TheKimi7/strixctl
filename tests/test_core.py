@@ -1,0 +1,192 @@
+"""Tests for the parts that need no hardware.
+
+Run from the checkout:  python3 -m unittest discover -s tests
+"""
+
+import copy
+import os
+import sys
+import types
+import unittest
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from strixctl import aura, config as cfg, hw  # noqa: E402
+
+
+class Percent(unittest.TestCase):
+    def test_firmware_receives_the_percent_asked_for(self):
+        # asus-wmi hands the firmware 100 * pwm / 255, truncated.
+        for percent in range(101):
+            self.assertEqual(100 * hw.pct_to_pwm(percent) // 255, percent)
+
+    def test_own_writes_read_back_unchanged(self):
+        for percent in range(101):
+            self.assertEqual(hw.pwm_to_pct(hw.pct_to_pwm(percent)), percent)
+
+    def test_firmware_defaults_read_back_unchanged(self):
+        # Defaults reach sysfs as 255 * percent / 100, truncated.
+        for percent in range(101):
+            self.assertEqual(hw.pwm_to_pct(255 * percent // 100), percent)
+
+    def test_out_of_range_is_clamped(self):
+        self.assertEqual(hw.pct_to_pwm(140), 255)
+        self.assertEqual(hw.pct_to_pwm(-3), 0)
+        self.assertEqual(hw.pwm_to_pct(999), 100)
+
+
+GOOD = [(35, 3), (52, 12), (58, 23), (64, 36), (70, 50), (76, 67), (80, 83), (90, 100)]
+
+
+class Validate(unittest.TestCase):
+    def test_accepts_a_sane_curve(self):
+        hw.FanCurve.validate(GOOD)
+
+    def test_last_point_must_be_full_speed(self):
+        with self.assertRaisesRegex(ValueError, "100%"):
+            hw.FanCurve.validate(GOOD[:-1] + [(90, 99)])
+
+    def test_rejects_wrong_length_and_slopes(self):
+        with self.assertRaises(ValueError):
+            hw.FanCurve.validate(GOOD[:-1])
+        with self.assertRaisesRegex(ValueError, "speed must not decrease"):
+            hw.FanCurve.validate([(35, 20), (52, 12)] + GOOD[2:])
+        with self.assertRaisesRegex(ValueError, "temperatures"):
+            hw.FanCurve.validate([(60, 3), (52, 12)] + GOOD[2:])
+        with self.assertRaisesRegex(ValueError, "outside 0-100"):
+            hw.FanCurve.validate(GOOD[:-1] + [(90, 101)])
+
+
+class Ceiling(unittest.TestCase):
+    def test_full_speed_curve_is_untouched(self):
+        self.assertEqual(hw.with_full_ceiling(GOOD), GOOD)
+
+    def test_duplicate_last_point_becomes_a_ramp(self):
+        fixed = hw.with_full_ceiling(GOOD[:-1] + [(80, 83)])
+        self.assertEqual(fixed[-2:], [(80, 83), (90, 100)])
+        hw.FanCurve.validate(fixed)
+
+    def test_distinct_last_point_keeps_its_temperature(self):
+        fixed = hw.with_full_ceiling(GOOD[:-1] + [(85, 90)])
+        self.assertEqual(fixed[-1], (85, 100))
+
+
+V1 = {
+    "active_profile": "Silent",
+    "profiles": {
+        "Silent": {
+            "platform_profile": "quiet",
+            "fan_mode": "curve",
+            "kbd_brightness": 1,
+            "fan_cpu": [[35, 5], [52, 22], [58, 44], [64, 68],
+                        [70, 95], [76, 128], [80, 158], [80, 158]],
+            "fan_gpu": [[35, 49], [35, 49], [44, 152], [51, 152],
+                        [56, 152], [63, 208], [70, 255], [70, 255]],
+        },
+    },
+}
+
+
+class Migrate(unittest.TestCase):
+    def test_v1_becomes_percent_with_a_full_ceiling(self):
+        data = copy.deepcopy(V1)
+        self.assertTrue(cfg.migrate(data))
+        silent = data["profiles"]["Silent"]
+        self.assertEqual(data["version"], cfg.VERSION)
+        self.assertNotIn("kbd_brightness", silent)
+        self.assertEqual(silent["fan_cpu"][:2], [[35, 2], [52, 9]])
+        self.assertEqual(silent["fan_cpu"][-2:], [[80, 62], [90, 100]])
+        self.assertEqual(silent["fan_gpu"][-1], [70, 100])
+        for key in ("fan_cpu", "fan_gpu"):
+            hw.FanCurve.validate(cfg.points(silent[key]))
+
+    def test_migrating_twice_changes_nothing(self):
+        data = copy.deepcopy(V1)
+        cfg.migrate(data)
+        again = copy.deepcopy(data)
+        self.assertFalse(cfg.migrate(again))
+        self.assertEqual(again, data)
+
+    def test_shipped_defaults_are_valid(self):
+        self.assertFalse(cfg.migrate(copy.deepcopy(cfg.DEFAULTS)))
+        for prof in cfg.DEFAULTS["profiles"].values():
+            self.assertNotIn("kbd_brightness", prof)
+            for key in ("fan_cpu", "fan_gpu"):
+                hw.FanCurve.validate(cfg.points(prof[key]))
+
+
+class ProfileForPlatform(unittest.TestCase):
+    def test_prefers_the_active_profile(self):
+        conf = copy.deepcopy(cfg.DEFAULTS)
+        conf["profiles"]["Loud"] = {"platform_profile": "balanced"}
+        conf["active_profile"] = "Loud"
+        self.assertEqual(cfg.profile_for_platform(conf, "balanced"), "Loud")
+        self.assertEqual(cfg.profile_for_platform(conf, "quiet"), "Silent")
+        self.assertIsNone(cfg.profile_for_platform(conf, "turbo"))
+
+
+LISTING = """\
+0: ASUS Aura Keyboard
+  Type:           Keyboard
+  Location:       HID: /dev/hidraw1
+  Modes: [Static] Breathing 'Color Cycle'
+  Zones: Keyboard
+  LEDs: 'Keyboard 1' 'Keyboard 2' 'Keyboard 3' 'Keyboard 4'
+5: G533ZM
+  Type:           Laptop
+  Location:       HID: /dev/hidraw3
+  Modes: [Direct] Static Breathing Flashing 'Spectrum Cycle' 'Rainbow Wave' Off
+  Zones: Keyboard
+  LEDs: 'Key: Escape' 'Key: F1' 'Key: F2' 'Key: F3' 'Key: F4' 'Key: F5'
+"""
+
+
+class OpenRGB(unittest.TestCase):
+    def setUp(self):
+        self.backend = aura.Aura(settings={"binary": sys.executable})
+        self.backend._devices = aura.parse_devices(LISTING)
+        self.sent = []
+
+        def fake_run(args):
+            self.sent.append(args)
+            return types.SimpleNamespace(stdout="", stderr="", returncode=0)
+
+        self.backend._run = fake_run
+        self.backend.desktop_brightness = lambda: 67
+
+    def test_listing_is_parsed(self):
+        zoned, perkey = self.backend._devices
+        self.assertTrue(zoned.is_zoned and not zoned.is_perkey)
+        self.assertTrue(perkey.is_perkey and perkey.serves("rainbow wave"))
+        self.assertEqual(zoned.modes, ["Static", "Breathing", "Color Cycle"])
+
+    def test_zoned_write_carries_four_colours_and_the_desktop_brightness(self):
+        self.backend.set_colors([[255, 0, 0]] * 4, mode="Static")
+        args = self.sent[0]
+        self.assertEqual(args[:4], ["--device", "0", "--mode", "Static"])
+        self.assertEqual(args[args.index("--brightness") + 1], "67")
+        self.assertEqual(args[args.index("--color") + 1],
+                         "ff0000,ff0000,ff0000,ff0000")
+
+    def test_perkey_effect_goes_to_the_perkey_entry_without_colour(self):
+        self.backend.set_colors([[255, 0, 0]] * 4, mode="Rainbow Wave", speed=40)
+        args = self.sent[0]
+        self.assertEqual(args[:2], ["--device", "5"])
+        self.assertNotIn("--color", args)
+        self.assertEqual(args[args.index("--speed") + 1], "40")
+        self.assertIn("--brightness", args)
+
+    def test_no_brightness_flag_when_the_level_is_unreadable(self):
+        self.backend.desktop_brightness = lambda: None
+        self.backend.set_colors([[0, 0, 255]] * 4, mode="Static")
+        self.assertNotIn("--brightness", self.sent[0])
+
+    def test_error_line_fails_despite_exit_zero(self):
+        self.backend._run = lambda args: types.SimpleNamespace(
+            stdout="Error: Mode 'Nope' not found\n", stderr="", returncode=0)
+        with self.assertRaisesRegex(OSError, "Nope"):
+            self.backend.set_colors([[0, 0, 255]] * 4, mode="Static")
+
+
+if __name__ == "__main__":
+    unittest.main()

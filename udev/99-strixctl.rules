@@ -14,4 +14,3 @@ KERNEL=="hidraw*", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1866", GROUP="use
 # Sysfs attributes: re-grant whenever the owning device appears or is rebound.
 ACTION=="add|change", SUBSYSTEM=="hwmon", ATTR{name}=="asus_custom_fan_curve", RUN+="/usr/lib/strixctl/strixctl-grant"
 ACTION=="add|change", SUBSYSTEM=="power_supply", KERNEL=="BAT*", RUN+="/usr/lib/strixctl/strixctl-grant"
-ACTION=="add|change", SUBSYSTEM=="leds", KERNEL=="asus::kbd_backlight", RUN+="/usr/lib/strixctl/strixctl-grant"

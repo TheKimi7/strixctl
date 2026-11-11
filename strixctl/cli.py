@@ -1,7 +1,10 @@
 """Command line front end.  Also the entry point the systemd user unit calls."""
 
 import argparse
+import filecmp
+import os
 import sys
+import time
 
 from . import apply as apply_mod
 from . import aura as aura_mod
@@ -21,10 +24,58 @@ def _state_line(label, available, writable, value):
     return f"  {label:<20} {str(value):<28} {state}"
 
 
+def _curve_text(points):
+    return "  ".join(f"{t}C:{p}%" for t, p in points)
+
+
+def _fan_state(fans):
+    armed = fans.armed
+    if all(armed.values()):
+        return "custom"
+    if not any(armed.values()):
+        return "firmware"
+    return ", ".join(f"{name} {'custom' if on else 'firmware'}"
+                     for name, on in armed.items())
+
+
+def stale_install():
+    """Files that differ between this installed copy and the checkout it came from.
+
+    An install that has fallen behind the checkout is the classic way for a
+    fix to "not work", so status says so instead of leaving it to be found.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    marker = os.path.join(os.path.dirname(here), "INSTALLED_FROM")
+    try:
+        with open(marker) as fh:
+            source = fh.read().strip()
+    except OSError:
+        return None, []
+    theirs = os.path.join(source, "strixctl")
+    if not os.path.isdir(theirs):
+        return source, []
+    names = sorted(n for n in set(os.listdir(here)) | set(os.listdir(theirs))
+                   if n.endswith(".py"))
+    differing = []
+    for name in names:
+        mine, other = os.path.join(here, name), os.path.join(theirs, name)
+        if not (os.path.exists(mine) and os.path.exists(other)
+                and filecmp.cmp(mine, other, shallow=False)):
+            differing.append(name)
+    return source, differing
+
+
+def _print_warnings():
+    for warning in cfg.warnings:
+        print(f"note: {warning}", file=sys.stderr)
+
+
 def cmd_status(args):
     conf = cfg.load()
+    _print_warnings()
     battery, platform = hw.Battery(), hw.PlatformProfile()
     fans, kbd = hw.Fans(), hw.KeyboardBacklight()
+    sensors = hw.Sensors()
     aura = aura_mod.Aura(settings=conf.get("openrgb"))
 
     print(f"strixctl -- {hw.board_name()}")
@@ -37,25 +88,39 @@ def cmd_status(args):
                       platform.available, platform.writable, platform.profile))
     print(_state_line("fan curves",
                       fans.available, fans.writable,
-                      "custom" if fans.available and fans.cpu.armed else "firmware"))
-    print(_state_line("kbd brightness",
-                      kbd.available, kbd.writable,
-                      f"{kbd.brightness}/{kbd.max_brightness}" if kbd.available else "-"))
+                      _fan_state(fans) if fans.available else "-"))
     keyboard = aura.find_keyboard() if aura.available else None
     print(_state_line("kbd colour", aura.available, keyboard is not None,
                       f"{keyboard.leds} zones" if keyboard else "no device"))
     if aura.available and keyboard is None:
         print(f"    {aura.why_unavailable()}")
+    if kbd.available:
+        # Not a strixctl control, so no ready/read-only state to report.
+        print(f"  {'kbd brightness':<20} "
+              f"{f'{kbd.brightness}/{kbd.max_brightness}':<28} set by the desktop")
     if fans.available:
         print()
+        temp, rpm = sensors.cpu_temp(), sensors.rpm()
+        if temp is not None:
+            print(f"  cpu temperature      {temp}C")
+        armed = fans.armed
         for name, curve in fans.curves().items():
-            pretty = "  ".join(f"{t}C:{p}" for t, p in curve)
-            print(f"  fan {name}: {pretty}")
+            speed = rpm.get(name)
+            what = "custom curve" if armed[name] else "firmware curve"
+            print(f"  fan {name}: {f'{speed} rpm' if speed is not None else '? rpm':<9} "
+                  f"{what}: {_curve_text(curve)}")
+    source, differing = stale_install()
+    if differing:
+        print()
+        print(f"  WARNING: this install is out of step with {source}")
+        print(f"    differs: {', '.join(differing)}")
+        print(f"    re-run: sudo {source}/install.sh")
     return 0
 
 
 def cmd_apply(args):
     results = apply_mod.apply_all(args.profile)
+    _print_warnings()
     failed = 0
     for knob, state, detail in results:
         marker = {"ok": "+", "skipped": ".", "unavailable": ".", "failed": "!"}[state]
@@ -102,14 +167,96 @@ def cmd_battery(args):
     return 0
 
 
+#: `fans test` holds each of these for SETTLE seconds. Flat up to 70 C and
+#: full speed above it, so the test cannot cook anything.
+TEST_STEPS = (40, 75)
+TEST_SETTLE = 18
+TEST_MIN_SWING = 300
+
+
+def _plateau(percent):
+    return [(30, percent), (40, percent), (50, percent), (60, percent),
+            (65, percent), (70, percent), (75, 100), (80, 100)]
+
+
+def _watch(sensors, seconds, label):
+    """Print readings for `seconds`; return the last rpm reading."""
+    rpm = {}
+    end = time.monotonic() + seconds
+    while True:
+        rpm = sensors.rpm()
+        speeds = "  ".join(f"{name} {value} rpm" for name, value in rpm.items())
+        print(f"  {label:<14} {sensors.cpu_temp()}C  {speeds}", flush=True)
+        if time.monotonic() >= end:
+            return rpm
+        time.sleep(3)
+
+
+def cmd_fans_test(fans):
+    """Arm two flat curves and see whether the fans follow them."""
+    sensors = hw.Sensors()
+    if not sensors.fan_paths:
+        print("no fan speed sensors to measure with", file=sys.stderr)
+        return 1
+    temp = sensors.cpu_temp()
+    if temp is not None and temp >= 70:
+        print(f"CPU is at {temp}C; the test holds the fans at a fixed speed "
+              "below 70C, so run it when the machine is idle.", file=sys.stderr)
+        return 1
+    was_armed = {name: curve.read() for name, curve in fans if curve.armed}
+    readings = {}
+    print("Takes about a minute. The fans will change speed twice.")
+    try:
+        readings["before"] = _watch(sensors, 6, "now")
+        for percent in TEST_STEPS:
+            for _name, curve in fans:
+                curve.apply(_plateau(percent))
+            readings[percent] = _watch(sensors, TEST_SETTLE, f"held at {percent}%")
+    finally:
+        # Whatever happens, do not leave a test curve armed.
+        fans.reset()
+        for name, points in was_armed.items():
+            getattr(fans, name).apply(points)
+    print("  restored:", _fan_state(fans))
+
+    low, high = readings[TEST_STEPS[0]], readings[TEST_STEPS[1]]
+    failed = 0
+    for name in sensors.fan_paths:
+        if low.get(name) is None or high.get(name) is None:
+            print(f"! {name} fan: no reading")
+            failed += 1
+            continue
+        swing = high[name] - low[name]
+        if swing >= TEST_MIN_SWING:
+            print(f"+ {name} fan follows a custom curve "
+                  f"({low[name]} rpm at {TEST_STEPS[0]}%, "
+                  f"{high[name]} rpm at {TEST_STEPS[1]}%)")
+        else:
+            print(f"! {name} fan did not respond "
+                  f"({low[name]} rpm at {TEST_STEPS[0]}%, "
+                  f"{high[name]} rpm at {TEST_STEPS[1]}%)")
+            failed += 1
+    return 1 if failed else 0
+
+
 def cmd_fans(args):
     fans = hw.Fans()
     if not fans.available:
         print("no asus_custom_fan_curve hwmon node", file=sys.stderr)
         return 1
+    if args.action == "watch":
+        sensors = hw.Sensors()
+        try:
+            while True:
+                _watch(sensors, 0, _fan_state(fans))
+                time.sleep(2)
+        except KeyboardInterrupt:
+            return 0
     if not fans.writable:
         print("fan curve attributes are read-only -- run install.sh", file=sys.stderr)
         return 1
+    if args.action == "test":
+        return cmd_fans_test(fans)
     fans.reset()
     print("both fans handed back to the firmware curve")
     return 0
@@ -237,8 +384,10 @@ def build_parser():
     p_battery = sub.add_parser("battery", help="set the charge limit, or 'off'")
     p_battery.add_argument("limit", help="percent (20-100) or 'off'")
 
-    p_fans = sub.add_parser("fans", help="fan controls")
-    p_fans.add_argument("action", choices=["reset"])
+    p_fans = sub.add_parser(
+        "fans", help="reset to the firmware curve, test that custom curves "
+                     "take effect, or watch speeds and temperature")
+    p_fans.add_argument("action", choices=["reset", "test", "watch"])
 
     p_colour = sub.add_parser(
         "colour", help="set keyboard zone colours, or 'list' the devices")

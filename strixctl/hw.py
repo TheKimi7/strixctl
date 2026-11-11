@@ -88,16 +88,59 @@ class PlatformProfile:
         _write(self.PATH, name)
 
 
+def pct_to_pwm(percent):
+    """Percent to the kernel's 0-255, rounded up.
+
+    The firmware works in percent; asus-wmi stores 0-255 and divides back down
+    with truncation on the way out (100 * pwm / 255). Rounding up here is what
+    makes the firmware receive exactly the percent that was asked for.
+    """
+    percent = max(0, min(100, int(percent)))
+    return -(-percent * 255 // 100)
+
+
+def pwm_to_pct(pwm):
+    """The kernel's 0-255 back to percent, rounded to nearest.
+
+    Nearest, because the readback is one of two things: a firmware default,
+    which the kernel truncated (255 * pct / 100), or a value written through
+    pct_to_pwm, which was rounded up. Nearest recovers the percent from both.
+    """
+    pwm = max(0, min(255, int(pwm)))
+    return (pwm * 200 + 255) // 510
+
+
+def with_full_ceiling(points):
+    """Return `points` with the last one raised to 100%.
+
+    Firmware curves do not all end at full speed (balanced stops at 83%), and
+    validate() insists that a custom curve does. When the last two points
+    share a temperature the last is moved up 10 C, so the result ramps to full
+    speed instead of stepping to it.
+    """
+    points = [tuple(point) for point in points]
+    if not points or points[-1][1] >= 100:
+        return points
+    temp = points[-1][0]
+    if len(points) > 1 and points[-2][0] >= temp:
+        temp = min(points[-2][0] + 10, 95)
+    points[-1] = (temp, 100)
+    return points
+
+
 class FanCurve:
     """One 8-point curve on asus_custom_fan_curve.
 
-    pwm{N}_enable is 2 for the firmware's own curve and 1 once a custom curve is
-    armed.  Points are (temp_celsius, pwm_0_255) and must not slope downward.
+    Points are (temp_celsius, percent). pwm{N}_enable is 1 once a custom curve
+    is armed and 2 for the firmware's own curve; writing 3 also reloads the
+    firmware defaults for the current platform profile into the readback,
+    which a plain 2 never does.
     """
 
-    #: below this PWM at/above this temperature we refuse to arm a curve
-    SAFETY_TEMP = 85
-    SAFETY_PWM = 128
+    #: The last point governs every temperature above it, so it has to be full
+    #: speed: whatever the curve does lower down, the machine can still cool
+    #: itself flat out.
+    CEILING = 100
 
     def __init__(self, root, fan="cpu"):
         self.root = root
@@ -124,13 +167,14 @@ class FanCurve:
         return _read(self.enable_path) == "1"
 
     def read(self):
+        """The curve the kernel holds, in percent."""
         points = []
         for i in range(1, FAN_POINTS + 1):
             temp = _read(self._pt(i, "temp"))
             pwm = _read(self._pt(i, "pwm"))
             if temp is None or pwm is None:
                 break
-            points.append((int(temp), int(pwm)))
+            points.append((int(temp), pwm_to_pct(pwm)))
         return points
 
     @staticmethod
@@ -139,54 +183,51 @@ class FanCurve:
         if len(points) != FAN_POINTS:
             raise ValueError(f"need exactly {FAN_POINTS} points, got {len(points)}")
         last_t = last_p = -1
-        for temp, pwm in points:
+        for temp, percent in points:
             if not 0 <= temp <= 110:
                 raise ValueError(f"temperature {temp} outside 0-110")
-            if not 0 <= pwm <= 255:
-                raise ValueError(f"pwm {pwm} outside 0-255")
+            if not 0 <= percent <= 100:
+                raise ValueError(f"fan speed {percent}% outside 0-100")
             if temp < last_t:
                 raise ValueError("temperatures must not decrease")
-            if pwm < last_p:
-                raise ValueError("pwm must not decrease")
-            last_t, last_p = temp, pwm
-        # The last point governs every temperature above it, so that PWM -- not
-        # just points that happen to sit above SAFETY_TEMP -- is the one that
-        # decides whether the machine can still cool itself. Stock ASUS curves
-        # top out at 80C, so checking only t >= SAFETY_TEMP would never fire.
-        ceiling = max(p for _, p in points)
-        if ceiling < FanCurve.SAFETY_PWM:
+            if percent < last_p:
+                raise ValueError("fan speed must not decrease")
+            last_t, last_p = temp, percent
+        if points[-1][1] < FanCurve.CEILING:
             raise ValueError(
-                f"curve never exceeds {ceiling}/255, below the "
-                f"{FanCurve.SAFETY_PWM}/255 floor; refusing to arm it")
-        hot = [p for t, p in points if t >= FanCurve.SAFETY_TEMP]
-        if hot and max(hot) < FanCurve.SAFETY_PWM:
-            raise ValueError(
-                f"curve asks for under {FanCurve.SAFETY_PWM}/255 at "
-                f"{FanCurve.SAFETY_TEMP}C or above; refusing to arm it")
+                f"the last point is {points[-1][1]}%, and it has to be "
+                f"{FanCurve.CEILING}%; refusing to arm a curve that cannot "
+                "reach full speed")
 
     def apply(self, points):
         self.validate(points)
-        for i, (temp, pwm) in enumerate(points, start=1):
+        for i, (temp, percent) in enumerate(points, start=1):
             _write(self._pt(i, "temp"), temp)
-            _write(self._pt(i, "pwm"), pwm)
+            _write(self._pt(i, "pwm"), pct_to_pwm(percent))
         _write(self.enable_path, 1)
 
     def reset(self):
-        """Hand the fan back to the firmware curve."""
-        _write(self.enable_path, 2)
+        """Hand the fan back to the firmware and reload its curve.
+
+        3 rather than 2, so that the readback is the firmware curve for the
+        platform profile in force now, not whichever one was fetched at boot.
+        """
+        try:
+            _write(self.enable_path, 3)
+        except OSError:
+            _write(self.enable_path, 2)
 
 
 class Fans:
     """Both fans, plus discovery of the asus_custom_fan_curve hwmon node."""
 
     def __init__(self):
-        self.root = None
-        for path in sorted(glob.glob("/sys/class/hwmon/hwmon*")):
-            if _read(f"{path}/name") == "asus_custom_fan_curve":
-                self.root = path
-                break
+        self.root = _hwmon_named("asus_custom_fan_curve")
         self.cpu = FanCurve(self.root, "cpu") if self.root else None
         self.gpu = FanCurve(self.root, "gpu") if self.root else None
+
+    def __iter__(self):
+        return iter((("cpu", self.cpu), ("gpu", self.gpu)))
 
     @property
     def available(self):
@@ -196,6 +237,11 @@ class Fans:
     def writable(self):
         return self.available and self.cpu.writable and self.gpu.writable
 
+    @property
+    def armed(self):
+        """Per fan: is a custom curve in force."""
+        return {name: curve.armed for name, curve in self}
+
     def curves(self):
         return {"cpu": self.cpu.read(), "gpu": self.gpu.read()}
 
@@ -203,9 +249,64 @@ class Fans:
         self.cpu.reset()
         self.gpu.reset()
 
+    def factory_curves(self):
+        """The firmware's own curves for the current platform profile.
+
+        The kernel only gives these up by reloading them over the stored
+        curve, which disarms a custom one. So a fan that was armed is re-armed
+        with what it had; the gap is far shorter than the several seconds a
+        fan takes to change speed.
+        """
+        out = {}
+        for name, curve in self:
+            held = curve.read() if curve.armed else None
+            curve.reset()
+            out[name] = curve.read()
+            if held is not None:
+                curve.apply(held)
+        return out
+
+
+class Sensors:
+    """Read-only telemetry: fan speeds and CPU temperature."""
+
+    FAN_LABELS = {"cpu": "cpu_fan", "gpu": "gpu_fan"}
+
+    def __init__(self):
+        self.fan_paths = {}
+        root = _hwmon_named("asus")
+        if root:
+            for label_path in sorted(glob.glob(f"{root}/fan*_label")):
+                label = _read(label_path)
+                for fan, wanted in self.FAN_LABELS.items():
+                    if label == wanted:
+                        self.fan_paths[fan] = label_path.replace("_label", "_input")
+        self.temp_path = None
+        for name in ("coretemp", "k10temp", "acpitz"):
+            root = _hwmon_named(name)
+            if root and os.path.exists(f"{root}/temp1_input"):
+                self.temp_path = f"{root}/temp1_input"
+                break
+
+    def rpm(self):
+        out = {}
+        for fan, path in self.fan_paths.items():
+            raw = _read(path)
+            out[fan] = int(raw) if raw and raw.lstrip("-").isdigit() else None
+        return out
+
+    def cpu_temp(self):
+        raw = _read(self.temp_path) if self.temp_path else None
+        return int(raw) // 1000 if raw and raw.lstrip("-").isdigit() else None
+
 
 class KeyboardBacklight:
-    """Brightness only.  This chassis exposes no colour attribute -- see aura.py."""
+    """The keyboard's brightness level. Read-only, on purpose.
+
+    The desktop owns this knob (Fn keys and the power applet, through UPower),
+    and strixctl only reads it so a colour change can be sent at the level the
+    desktop already chose. Colour is a separate matter -- see aura.py.
+    """
 
     PATH = "/sys/class/leds/asus::kbd_backlight"
 
@@ -214,23 +315,29 @@ class KeyboardBacklight:
         return os.path.exists(f"{self.PATH}/brightness")
 
     @property
-    def writable(self):
-        return _writable(f"{self.PATH}/brightness")
-
-    @property
     def max_brightness(self):
         raw = _read(f"{self.PATH}/max_brightness")
-        return int(raw) if raw else 0
+        return int(raw) if raw and raw.isdigit() else 0
 
     @property
     def brightness(self):
         raw = _read(f"{self.PATH}/brightness")
-        return int(raw) if raw else 0
+        return int(raw) if raw and raw.isdigit() else 0
 
-    @brightness.setter
-    def brightness(self, level):
-        level = max(0, min(int(level), self.max_brightness))
-        _write(f"{self.PATH}/brightness", level)
+    @property
+    def percent(self):
+        """Brightness as 0-100, or None when there is nothing to read."""
+        top = self.max_brightness
+        if not self.available or top <= 0:
+            return None
+        return round(100 * self.brightness / top)
+
+
+def _hwmon_named(name):
+    for path in sorted(glob.glob("/sys/class/hwmon/hwmon*")):
+        if _read(f"{path}/name") == name:
+            return path
+    return None
 
 
 def board_name():

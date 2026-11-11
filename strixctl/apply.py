@@ -41,30 +41,33 @@ def apply_profile(conf, name, results):
 
     # The firmware reloads its own curve when the platform profile changes, so
     # the custom curve has to go on afterwards, never before.
+    apply_fans(prof, results)
+    apply_aura(conf, prof, results)
+
+
+def apply_fans(prof, results):
+    """Arm the profile's curves, or hand both fans back to the firmware."""
     fans = hw.Fans()
-    if fans.available:
-        if prof.get("fan_mode") == "curve":
-            for fan, curve in (("cpu", fans.cpu), ("gpu", fans.gpu)):
-                try:
-                    curve.apply(cfg.points(prof[f"fan_{fan}"]))
-                    results.append((f"fan_{fan}", "ok", "curve armed"))
-                except (OSError, ValueError, KeyError) as exc:
-                    results.append((f"fan_{fan}", "failed", str(exc)))
-        else:
+    if not fans.available:
+        return
+    if prof.get("fan_mode") == "curve":
+        for fan, curve in fans:
             try:
-                fans.reset()
-                results.append(("fans", "ok", "firmware curve"))
-            except OSError as exc:
-                results.append(("fans", "failed", str(exc)))
-
-    kbd = hw.KeyboardBacklight()
-    if kbd.available and prof.get("kbd_brightness") is not None:
+                curve.apply(cfg.points(prof[f"fan_{fan}"]))
+                results.append((f"fan_{fan}", "ok", "curve armed"))
+            except (OSError, ValueError, KeyError) as exc:
+                results.append((f"fan_{fan}", "failed", str(exc)))
+    else:
         try:
-            kbd.brightness = prof["kbd_brightness"]
-            results.append(("kbd_brightness", "ok", str(prof["kbd_brightness"])))
+            fans.reset()
+            results.append(("fans", "ok", "firmware curve"))
         except OSError as exc:
-            results.append(("kbd_brightness", "failed", str(exc)))
+            results.append(("fans", "failed", str(exc)))
 
+
+def apply_aura(conf, prof, results):
+    # Keyboard brightness is not applied here or anywhere else: the desktop
+    # owns it, and the colour write below is sent at the level it holds.
     from . import aura
     backend = aura.Aura(settings=conf.get("openrgb"))
     wanted_aura = prof.get("aura")
@@ -84,6 +87,20 @@ def apply_profile(conf, name, results):
             results.append(("kbd_colour", "failed", str(exc)))
     elif wanted_aura:
         results.append(("kbd_colour", "unavailable", backend.why_unavailable()))
+
+
+def rearm_fans(name=None):
+    """Put the profile's fan setting back without touching anything else.
+
+    For when the kernel has dropped a custom curve on its own: it does that on
+    every platform profile change, and a resume from sleep can do it too.
+    """
+    conf = cfg.load()
+    results = []
+    prof = cfg.profile(conf, name)
+    if prof is not None:
+        apply_fans(prof, results)
+    return results
 
 
 def apply_all(name=None):

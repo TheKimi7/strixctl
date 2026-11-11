@@ -37,7 +37,4 @@ for hwmon in /sys/class/hwmon/hwmon*; do
     done
 done
 
-# Keyboard backlight brightness
-grant /sys/class/leds/asus::kbd_backlight/brightness
-
 exit 0

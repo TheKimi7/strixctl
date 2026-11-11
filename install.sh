@@ -128,6 +128,9 @@ echo "Installing strixctl (group: $GROUP)"
 install -d "$LIBDIR"
 cp -r "$SRC/strixctl" "$LIBDIR/"
 install -m 0755 "$SRC/share/strixctl-grant" "$LIBDIR/strixctl-grant"
+# Where this copy came from, so 'strixctl status' can say when the checkout
+# has moved on and the install has not.
+printf '%s\n' "$SRC" > "$LIBDIR/INSTALLED_FROM"
 
 cat > "$BINDIR/strixctl" <<LAUNCHER
 #!/usr/bin/env python3
@@ -166,7 +169,7 @@ install -m 0755 "$SRC/get-openrgb.sh" "$LIBDIR/get-openrgb.sh"
 
 udevadm control --reload-rules
 udevadm trigger --subsystem-match=hwmon --subsystem-match=power_supply \
-    --subsystem-match=leds --subsystem-match=hidraw 2>/dev/null || true
+    --subsystem-match=hidraw 2>/dev/null || true
 
 systemctl daemon-reload
 systemctl enable --now strixctl-permissions.service

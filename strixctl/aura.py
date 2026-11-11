@@ -41,6 +41,14 @@ keyboard, as did setting it to a static colour.
 
 So devices are matched on name, LED count and advertised effect, never on a
 bare index -- the indices shuffle between runs.
+
+Brightness
+----------
+strixctl has no brightness control of its own: the desktop owns that knob (Fn
+keys, the power applet, UPower, `asus::kbd_backlight`). An effect write can
+carry a brightness of its own, though, so every write passes the level the
+desktop currently holds as `--brightness`. That keeps a colour change from
+leaving the keyboard at a level the desktop does not know about.
 """
 
 import os
@@ -49,6 +57,7 @@ import shutil
 import subprocess
 
 from . import config as cfg
+from . import hw
 
 #: Names OpenRGB gives the working 4-zone interface.
 NAME_PATTERN = re.compile(r"aura.*keyboard", re.IGNORECASE)
@@ -284,6 +293,11 @@ class Aura:
                                mode=settings.get("mode", "Static"),
                                speed=settings.get("speed"))
 
+    @staticmethod
+    def desktop_brightness():
+        """The level the desktop holds, as 0-100, or None if unreadable."""
+        return hw.KeyboardBacklight().percent
+
     @property
     def modes(self):
         """The effects strixctl offers that this hardware actually reports.
@@ -313,6 +327,11 @@ class Aura:
         args = ["--device", str(index), "--mode", mode]
         if speed is not None and mode_takes_speed(mode):
             args += ["--speed", str(max(0, min(100, int(speed))))]
+        # Follow the desktop's brightness instead of whatever the effect would
+        # default to. OpenRGB ignores this for modes without a brightness.
+        level = self.desktop_brightness()
+        if level is not None:
+            args += ["--brightness", str(level)]
         if mode_takes_color(mode):
             # A colour list is per-zone on a 4-zone entry, but per-*key* on the
             # 83-LED one, where it would paint four keys and leave the rest
