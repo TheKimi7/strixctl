@@ -7,16 +7,15 @@ knob is a UI state to render, not an exception to catch.
 
 How the window thinks
 ---------------------
-* The profile buttons along the top are the main control. Clicking one
-  switches to that profile and applies it, the same as the tray does.
-* Everything on the pages below edits the profile that is selected. Edits are
-  held in memory until Apply, which saves and applies them; Revert drops them.
-  Both buttons are live only while there is something unapplied.
-* The charge limit is the exception: it belongs to the machine and not to a
-  profile, so it takes effect as soon as it is picked.
+Every control is independent. The fans and the keyboard each have their own
+page, their own unapplied state and their own Apply, and applying one never
+touches the other. The power mode and the charge limit belong to the machine
+rather than to a page, so they live on Home and take effect the moment they
+are picked.
 
-`self.config` is the working copy and `self._disk` is what is saved; the
-difference between their profiles is what "unapplied" means.
+`self.config` is the working copy and `self._disk` is what is saved. A section
+whose two copies differ is unapplied; Apply saves and applies that section
+alone, so an unapplied edit on the other page never rides along.
 
 Anything that runs OpenRGB goes through StrixWindow._in_background: one call
 takes a couple of seconds and may take thirty, which is far too long to hold
@@ -49,7 +48,6 @@ FAN_TITLES = {"cpu": "CPU fan", "gpu": "GPU fan"}
 CHARGE_CHOICES = (60, 80, 100)
 
 CSS = b"""
-.strix-profile button { padding: 10px 22px; font-weight: bold; }
 .strix-tile { padding: 10px 14px; border: 1px solid alpha(@theme_fg_color, 0.14);
               border-radius: 6px; }
 .strix-tile-title { font-size: 85%; opacity: 0.6; }
@@ -502,6 +500,8 @@ class StrixWindow(Gtk.Window):
         self._alive = True
         self._busy = False
         self._aura_ready = False
+        #: section name -> (apply button, revert button, "not applied" label)
+        self._actions = {}
         # True while widgets are being primed: a primed widget must not be
         # mistaken for the user changing something.
         self._loading = True
@@ -511,7 +511,6 @@ class StrixWindow(Gtk.Window):
         self.add(outer)
         self.infobar = self._build_infobar()
         outer.pack_start(self.infobar, False, False, 0)
-        outer.pack_start(self._build_top_bar(), False, False, 0)
 
         self.stack = Gtk.Stack()
         self.stack.add_titled(self._build_home_page(), "home", "Home")
@@ -520,6 +519,7 @@ class StrixWindow(Gtk.Window):
         switcher = Gtk.StackSwitcher()
         switcher.set_stack(self.stack)
         switcher.set_halign(Gtk.Align.START)
+        switcher.set_margin_top(14)
         switcher.set_margin_start(14)
         outer.pack_start(switcher, False, False, 0)
         outer.pack_start(self.stack, True, True, 0)
@@ -588,31 +588,6 @@ class StrixWindow(Gtk.Window):
             bar.get_content_area().show_all()
         return bar
 
-    def _build_top_bar(self):
-        box = Gtk.Box(spacing=8)
-        box.set_border_width(14)
-
-        self.profile_choice = Choice(self.on_profile_picked)
-        self.profile_choice.get_style_context().add_class("strix-profile")
-        self.profile_choice.set_options(
-            [(name, name) for name in self.config["profiles"]])
-        self.profile_choice.set_tooltip_text(
-            "Click a profile to switch to it. It is applied straight away.")
-        box.pack_start(self.profile_choice, False, False, 0)
-
-        self.apply_button = Gtk.Button(label="Apply")
-        self.apply_button.get_style_context().add_class("suggested-action")
-        self.apply_button.set_valign(Gtk.Align.CENTER)
-        self.apply_button.connect("clicked", self.on_apply)
-        self.revert_button = Gtk.Button(label="Revert")
-        self.revert_button.set_valign(Gtk.Align.CENTER)
-        self.revert_button.connect("clicked", self.on_revert)
-        box.pack_end(self.apply_button, False, False, 0)
-        box.pack_end(self.revert_button, False, False, 0)
-        self.dirty_label = _label("", "strix-dim", xalign=1)
-        box.pack_end(self.dirty_label, False, False, 4)
-        return box
-
     # ------------------------------------------------------------------- pages
 
     @staticmethod
@@ -620,6 +595,21 @@ class StrixWindow(Gtk.Window):
         page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
         page.set_border_width(14)
         return page
+
+    def _action_row(self, section, apply_label, on_apply):
+        """The Apply/Revert pair for one page, live only when it is unapplied."""
+        row = Gtk.Box(spacing=8)
+        note = _label("", "strix-dim", xalign=1)
+        apply_button = Gtk.Button(label=apply_label)
+        apply_button.get_style_context().add_class("suggested-action")
+        apply_button.connect("clicked", on_apply)
+        revert = Gtk.Button(label="Revert")
+        revert.connect("clicked", self.on_revert, section)
+        row.pack_end(apply_button, False, False, 0)
+        row.pack_end(revert, False, False, 0)
+        row.pack_end(note, True, True, 4)
+        self._actions[section] = (apply_button, revert, note)
+        return row
 
     def _build_home_page(self):
         page = self._page()
@@ -635,12 +625,9 @@ class StrixWindow(Gtk.Window):
             tiles.pack_start(tile, True, True, 0)
         page.pack_start(tiles, False, False, 0)
 
-        self.profile_heading = _label("", "strix-heading")
-        self.profile_heading.set_margin_top(6)
-        page.pack_start(self.profile_heading, False, False, 0)
-
         grid = Gtk.Grid(column_spacing=14, row_spacing=10)
-        grid.attach(_label("Power mode", "strix-dim"), 0, 0, 1, 1)
+        grid.set_margin_top(6)
+        grid.attach(_label("Power mode", "strix-heading"), 0, 0, 1, 1)
         self.power_choice = Choice(self.on_power_picked)
         self.power_choice.set_options(
             [(name, name.capitalize()) for name in self.platform.choices])
@@ -649,43 +636,41 @@ class StrixWindow(Gtk.Window):
             "How hard the firmware lets the CPU and GPU run.")
         grid.attach(self.power_choice, 1, 0, 2, 1)
 
-        grid.attach(_label("Fans", "strix-dim"), 0, 1, 1, 1)
+        grid.attach(_label("Fans", "strix-heading"), 0, 1, 1, 1)
         self.home_fans = _label("")
         self.home_fans.set_hexpand(True)
         grid.attach(self.home_fans, 1, 1, 1, 1)
-        edit_fans = Gtk.Button(label="Edit curve")
-        edit_fans.connect("clicked", lambda *_: self.stack.set_visible_child_name("fans"))
+        edit_fans = Gtk.Button(label="Edit the curve")
+        edit_fans.connect("clicked",
+                          lambda *_: self.stack.set_visible_child_name("fans"))
         grid.attach(edit_fans, 2, 1, 1, 1)
 
-        grid.attach(_label("Keyboard", "strix-dim"), 0, 2, 1, 1)
+        grid.attach(_label("Keyboard", "strix-heading"), 0, 2, 1, 1)
         self.home_kbd = _label("")
         grid.attach(self.home_kbd, 1, 2, 1, 1)
-        edit_kbd = Gtk.Button(label="Edit colour")
+        edit_kbd = Gtk.Button(label="Edit the colour")
         edit_kbd.connect("clicked",
                          lambda *_: self.stack.set_visible_child_name("keyboard"))
         grid.attach(edit_kbd, 2, 2, 1, 1)
-        page.pack_start(grid, False, False, 0)
 
-        page.pack_start(Gtk.Separator(), False, False, 4)
-        page.pack_start(_label("Battery, for every profile", "strix-heading"),
-                        False, False, 0)
+        grid.attach(_label("Battery", "strix-heading"), 0, 3, 1, 1)
         if self.battery.available:
-            row = Gtk.Box(spacing=14)
+            row = Gtk.Box(spacing=10)
             row.pack_start(_label("Stop charging at", "strix-dim"), False, False, 0)
             self.charge_choice = Choice(self.on_charge_picked)
             self.charge_choice.set_sensitive(self.battery.writable)
             row.pack_start(self.charge_choice, False, False, 0)
-            self.charge_note = _label("", "strix-dim")
-            row.pack_start(self.charge_note, False, False, 0)
-            page.pack_start(row, False, False, 0)
-            page.pack_start(_label(
-                "Takes effect straight away. A lower limit is kinder to a "
-                "battery that spends its life plugged in.", "strix-dim",
-                wrap=True), False, False, 0)
+            grid.attach(row, 1, 3, 2, 1)
         else:
-            page.pack_start(_label(
-                "This battery has no charge limit to set.", "strix-dim"),
-                False, False, 0)
+            grid.attach(_label("no charge limit on this battery", "strix-dim"),
+                        1, 3, 2, 1)
+        page.pack_start(grid, False, False, 0)
+
+        page.pack_start(_label(
+            "The power mode and the charge limit take effect as soon as you "
+            "pick one. The fans and the keyboard are set on their own pages "
+            "and have nothing to do with each other.", "strix-dim", wrap=True),
+            False, False, 6)
         return page
 
     def _build_fan_page(self):
@@ -756,6 +741,9 @@ class StrixWindow(Gtk.Window):
         self.point_entries[-1][1].set_tooltip_text(
             "Fixed at 100% so the fans can always reach full speed.")
         page.pack_start(self.numbers, False, False, 0)
+
+        page.pack_end(self._action_row("fans", "Apply to the fans",
+                                       self.on_apply_fans), False, False, 0)
         return page
 
     def _build_keyboard_page(self):
@@ -795,72 +783,71 @@ class StrixWindow(Gtk.Window):
         side.pack_start(self.speed_row, False, False, 0)
 
         self.match_button = Gtk.Button(label="Use this colour on every zone")
+        self.match_button.set_halign(Gtk.Align.START)
         self.match_button.connect("clicked", self.on_match_zones)
-        self.preview_button = Gtk.Button(label="Try it on the keyboard")
-        self.preview_button.set_tooltip_text(
-            "Send this to the keyboard now, without saving it to the profile.")
-        self.preview_button.connect("clicked", self.on_preview)
-        for button in (self.match_button, self.preview_button):
-            button.set_halign(Gtk.Align.START)
-            side.pack_start(button, False, False, 0)
+        side.pack_start(self.match_button, False, False, 0)
         body.pack_start(side, False, False, 0)
         page.pack_start(body, False, False, 0)
 
         self.kbd_note = _label("", "strix-dim", wrap=True)
-        page.pack_end(self.kbd_note, False, False, 0)
+        page.pack_start(self.kbd_note, False, False, 0)
+        page.pack_end(self._action_row("aura", "Apply to the keyboard",
+                                       self.on_apply_aura), False, False, 0)
         return page
 
     # ----------------------------------------------------------------- state
 
-    def _profile(self):
-        return cfg.profile(self.config) or {}
+    def _aura_settings(self):
+        return self.config.setdefault("aura", {})
 
-    def _aura(self):
-        return self._profile().setdefault("aura", {})
+    def _fan_settings(self):
+        return self.config.setdefault("fans", {})
 
     def _curves(self):
-        prof = self._profile()
-        return {fan: cfg.points(prof.get(f"fan_{fan}", [])) for fan in ("cpu", "gpu")}
+        return cfg.curves(self.config)
+
+    def _dirty(self, section):
+        return self.config.get(section) != self._disk.get(section)
 
     @property
     def dirty(self):
-        return self.config["profiles"] != self._disk["profiles"]
+        return any(self._dirty(section) for section in self._actions)
 
-    def _changed(self):
-        """Something in the working copy moved: refresh what depends on it."""
-        dirty = self.dirty
-        self.apply_button.set_sensitive(dirty and not self._busy)
-        self.revert_button.set_sensitive(dirty and not self._busy)
-        self.dirty_label.set_text("Not applied yet" if dirty else "")
+    def _refresh_actions(self):
+        """Something moved: light up the Apply that owns it, and refresh Home."""
+        for section, (apply_button, revert, note) in self._actions.items():
+            dirty = self._dirty(section)
+            apply_button.set_sensitive(dirty and not self._busy)
+            revert.set_sensitive(dirty and not self._busy)
+            note.set_text("Not applied yet" if dirty else "")
         self._sync_home()
 
     def _set_busy(self, busy):
         self._busy = busy
-        self.profile_choice.set_sensitive(not busy)
-        self.preview_button.set_sensitive(not busy and self.aura.available)
-        self._changed()
+        self._refresh_actions()
+
+    def _save(self, section):
+        """Save one section, leaving the other's unapplied edits on the floor."""
+        self._disk[section] = copy.deepcopy(self.config[section])
+        cfg.save(self._disk)
+        self._seen_mtime = cfg.mtime()
 
     def load_widgets(self):
-        """Prime every widget from the working copy of the active profile."""
+        """Prime every widget from the working copy."""
         # Stored colours may be short or missing. Fill them in on both copies
         # first, so that doing so is not mistaken for an edit.
         for conf in (self.config, self._disk):
-            for prof in conf["profiles"].values():
-                settings = prof.setdefault("aura", {})
-                settings["colors"] = aura_mod.normalise_colors(settings, cfg.ZONES)
-                settings.pop("color", None)
+            settings = conf.setdefault("aura", {})
+            settings["colors"] = aura_mod.normalise_colors(settings, cfg.ZONES)
+            settings.pop("color", None)
 
         self._loading = True
         try:
-            prof = self._profile()
-            self.profile_choice.set_active(self.config.get("active_profile"))
-            self.profile_heading.set_text(
-                f"{self.config.get('active_profile')} profile")
-            self.power_choice.set_active(prof.get("platform_profile"))
             if self.fans.available:
                 self.fan_mode.set_active(
-                    "curve" if prof.get("fan_mode") == "curve" else "auto")
-            settings = self._aura()
+                    "curve" if self._fan_settings().get("mode") == "curve"
+                    else "auto")
+            settings = self._aura_settings()
             wanted = settings.get("mode", "Static")
             self.effect_choice.set_active(
                 wanted if wanted in self._modes else self._modes[0])
@@ -871,10 +858,10 @@ class StrixWindow(Gtk.Window):
             self._loading = False
         self._sync_fan_page()
         self._sync_keyboard_page()
-        self._changed()
+        self._refresh_actions()
 
     def _load_charge(self):
-        battery = self.config.get("battery", {})
+        battery = self.config.get("battery") or {}
         stored = int(battery.get("limit", 80))
         values = sorted(set(CHARGE_CHOICES)
                         | ({stored} if 20 <= stored < 100 else set()))
@@ -882,12 +869,6 @@ class StrixWindow(Gtk.Window):
             [(value, "100% (no limit)" if value == 100 else f"{value}%")
              for value in values])
         self.charge_choice.set_active(stored if battery.get("enabled") else 100)
-        self._show_charge()
-
-    def _show_charge(self):
-        actual = self.battery.limit
-        self.charge_note.set_text(
-            f"charging stops at {actual}% now" if actual else "")
 
     def _tick(self):
         """Refresh the live readings. Returns False once the window is gone."""
@@ -906,6 +887,10 @@ class StrixWindow(Gtk.Window):
         self.tile_temp.show_reading(
             f"{temp}°C" if temp is not None else "–",
             f"{self.platform.profile} mode" if self.platform.available else "")
+        if self.platform.available and not self._loading:
+            # Always show the mode the machine is actually in, even if
+            # something else changed it.
+            self.power_choice.set_active(self.platform.profile)
         if self.fans.available:
             armed = self.fans.armed
             for fan, tile in self.tile_fans.items():
@@ -914,6 +899,9 @@ class StrixWindow(Gtk.Window):
                     f"{speed} rpm" if speed is not None else "–",
                     "your curve" if armed.get(fan) else "firmware curve")
             self.plot.show_readings(temp, rpm)
+        # Brightness is the desktop's to change, so it is read every tick
+        # rather than only when something here is edited.
+        self._sync_home()
         note = self._aura_note
         if self.kbd.available:
             note = (f"Brightness is {self.kbd.brightness} of "
@@ -925,10 +913,10 @@ class StrixWindow(Gtk.Window):
     # ------------------------------------------------------------ home page
 
     def _sync_home(self):
-        prof = self._profile()
         self.home_fans.set_text(
-            "Your curve" if prof.get("fan_mode") == "curve" else "Firmware decides")
-        settings = self._aura()
+            "Your curve" if self._fan_settings().get("mode") == "curve"
+            else "Firmware decides")
+        settings = self._aura_settings()
         mode = settings.get("mode", "Static")
         self.home_kbd.set_text(mode)
         self.home_strip.paint(aura_mod.normalise_colors(settings, cfg.ZONES),
@@ -938,53 +926,61 @@ class StrixWindow(Gtk.Window):
             f"brightness {self.kbd.brightness} of {self.kbd.max_brightness}"
             if self.kbd.available else "")
 
-    def on_profile_picked(self, name):
-        """Switch to `name` and apply it. Unapplied edits do not come along."""
-        if self._busy:
-            return
-        dropped = self.dirty
-        conf = copy.deepcopy(self._disk)
-        conf["active_profile"] = name
-        cfg.save(conf)
-        self._seen_mtime = cfg.mtime()
-        self._disk = conf
-        self.config = copy.deepcopy(conf)
-        self.load_widgets()
-        self._run_apply(
-            name, f"Switching to {name}…"
-            + (" Unapplied changes were dropped." if dropped else ""))
-
     def on_power_picked(self, choice):
-        self._profile()["platform_profile"] = choice
-        self._changed()
+        """Set the power mode now, then put the fan setting back.
+
+        The firmware reloads its own curve when the mode changes, so a custom
+        curve has to be re-armed afterwards or it silently stops applying.
+        """
+        if self._loading:
+            return
+        for conf in (self.config, self._disk):
+            conf["power"] = choice
+        # Save the on-disk copy, not the working one: an unapplied curve or
+        # colour must not ride along with a power mode change.
+        cfg.save(self._disk)
+        self._seen_mtime = cfg.mtime()
+        try:
+            self.platform.profile = choice
+        except (OSError, ValueError) as exc:
+            self.set_status(f"Could not set the power mode: {exc}")
+            return
+        results = apply_mod.rearm_fans(self._disk)
+        failures = [detail for _knob, state, detail in results if state == "failed"]
+        text = f"Power mode {choice}."
+        if failures:
+            text += " The fans could not be set back: " + "; ".join(failures)
+        elif (self._disk.get("fans") or {}).get("mode") == "curve":
+            text += " Your fan curve was armed again."
+        self.set_status(text)
 
     def on_charge_picked(self, value):
         """The charge limit is machine-wide, so it is written straight away."""
+        if self._loading:
+            return
         for conf in (self.config, self._disk):
             battery = conf.setdefault("battery", {})
             battery["enabled"] = value < 100
             if value < 100:
                 battery["limit"] = value
-        # Save the on-disk copy, not the working one: unapplied profile edits
-        # must not ride along with a battery change.
         cfg.save(self._disk)
         self._seen_mtime = cfg.mtime()
-        if self.battery.writable:
-            try:
-                self.battery.limit = value
-                self.set_status(
-                    "Charge limit off." if value == 100
-                    else f"Charging now stops at {value}%.")
-            except (OSError, ValueError) as exc:
-                self.set_status(f"Could not set the charge limit: {exc}")
-        self._show_charge()
+        if not self.battery.writable:
+            self.set_status("Saved, but the charge limit is read-only.")
+            return
+        try:
+            self.battery.limit = value
+            self.set_status("Charge limit off." if value == 100
+                            else f"Charging now stops at {value}%.")
+        except (OSError, ValueError) as exc:
+            self.set_status(f"Could not set the charge limit: {exc}")
 
     # ------------------------------------------------------------- fan page
 
     def _sync_fan_page(self):
         if not self.fans.available:
             return
-        custom = self._profile().get("fan_mode") == "curve"
+        custom = self._fan_settings().get("mode") == "curve"
         editable = custom and self.fans.writable
         curves = self._curves()
         caption = ""
@@ -995,7 +991,7 @@ class StrixWindow(Gtk.Window):
                 curves = self.fans.curves()
                 caption = "the firmware's curve, read from the machine"
             else:
-                caption = "your curve, which this profile does not use"
+                caption = "your curve, which the fans are not using"
         self.plot.show_curves(curves, self.fan, editable, caption)
         for widget in (self.fan_pick, self.fan_pick_label, self.fan_tools):
             widget.set_visible(custom)
@@ -1005,8 +1001,8 @@ class StrixWindow(Gtk.Window):
             "each fan sits on its curve right now. The last point stays at "
             "100% so the fans can always reach full speed."
             if custom else
-            "The firmware runs the fans for this profile. Pick “My curve” "
-            "to shape them yourself.")
+            "The firmware runs the fans. Pick “My curve” to shape "
+            "them yourself.")
         self._fill_numbers()
 
     def _fill_numbers(self):
@@ -1016,14 +1012,14 @@ class StrixWindow(Gtk.Window):
             pct_entry.set_text(str(percent))
 
     def _set_point(self, fan, index, temp, percent):
-        prof = self._profile()
-        points = cfg.points(prof.get(f"fan_{fan}", []))
+        settings = self._fan_settings()
+        points = cfg.points(settings.get(fan) or [])
         if index >= len(points):
             return
         points[index] = clamp_point(points, index, temp, percent)
-        prof[f"fan_{fan}"] = [list(point) for point in points]
+        settings[fan] = [list(point) for point in points]
         self._sync_fan_page()
-        self._changed()
+        self._refresh_actions()
 
     def on_point_moved(self, fan, index, temp, percent):
         self._set_point(fan, index, temp, percent)
@@ -1049,9 +1045,11 @@ class StrixWindow(Gtk.Window):
         return False
 
     def on_fan_mode_picked(self, mode):
-        self._profile()["fan_mode"] = mode
+        if self._loading:
+            return
+        self._fan_settings()["mode"] = mode
         self._sync_fan_page()
-        self._changed()
+        self._refresh_actions()
 
     def on_fan_picked(self, fan):
         self.fan = fan
@@ -1067,24 +1065,34 @@ class StrixWindow(Gtk.Window):
         except (OSError, ValueError) as exc:
             self.set_status(f"Could not read the firmware curve: {exc}")
             return
-        prof = self._profile()
+        settings = self._fan_settings()
         raised = False
         for fan, points in curves.items():
             fixed = hw.with_full_ceiling(points)
             raised = raised or fixed != points
-            prof[f"fan_{fan}"] = [list(point) for point in fixed]
+            settings[fan] = [list(point) for point in fixed]
         running = self.platform.profile if self.platform.available else "current"
-        text = f"Loaded the firmware's {running} curve. Apply to use it."
+        text = (f"Loaded the firmware's {running} curve. "
+                "Apply it to the fans to use it.")
         if raised:
             text += (" It stops short of full speed, so the last point was "
                      "raised to 100%.")
-        chosen = prof.get("platform_profile")
-        if chosen and chosen != running:
-            text += (f" This profile uses {chosen} mode, which is not what "
-                     "the machine is running yet.")
         self.set_status(text)
         self._sync_fan_page()
-        self._changed()
+        self._refresh_actions()
+
+    def on_apply_fans(self, _button):
+        settings = self._fan_settings()
+        if settings.get("mode") == "curve":
+            for fan, points in self._curves().items():
+                try:
+                    hw.FanCurve.validate(points)
+                except ValueError as exc:
+                    self.set_status(
+                        f"The {FAN_TITLES[fan]} curve cannot be used: {exc}")
+                    return
+        self._save("fans")
+        self._run_section("fans", apply_mod.apply_fans, "the fans")
 
     # -------------------------------------------------------- keyboard page
 
@@ -1105,10 +1113,10 @@ class StrixWindow(Gtk.Window):
         if modes != self._modes:
             self._modes = modes
             self.effect_choice.set_options([(mode, mode) for mode in modes])
-            wanted = self._aura().get("mode", "Static")
+            wanted = self._aura_settings().get("mode", "Static")
             self.effect_choice.set_active(wanted if wanted in modes else modes[0])
         self._sync_keyboard_page()
-        self._set_busy(self._busy)
+        self._refresh_actions()
         self._tick()
 
     @staticmethod
@@ -1121,7 +1129,7 @@ class StrixWindow(Gtk.Window):
 
     def _sync_keyboard_page(self):
         """Show only the controls the chosen effect listens to."""
-        settings = self._aura()
+        settings = self._aura_settings()
         mode = settings.get("mode", "Static")
         how = self._strip_mode(mode)
         # Until the probe has answered, asking would block on OpenRGB.
@@ -1158,9 +1166,11 @@ class StrixWindow(Gtk.Window):
                 "another zone on the strip to colour it.")
 
     def on_effect_picked(self, mode):
-        self._aura()["mode"] = mode
+        if self._loading:
+            return
+        self._aura_settings()["mode"] = mode
         self._sync_keyboard_page()
-        self._changed()
+        self._refresh_actions()
 
     def on_zone_picked(self, zone):
         self.zone = zone
@@ -1169,83 +1179,63 @@ class StrixWindow(Gtk.Window):
     def on_editor_colour(self, editor):
         if self._loading:
             return
-        settings = self._aura()
+        settings = self._aura_settings()
         colours = aura_mod.normalise_colors(settings, cfg.ZONES)
         colours[self.zone] = list(editor.rgb)
         settings["colors"] = colours
         self.strip.paint(colours, self._strip_mode(settings.get("mode", "Static")),
                          self.zone)
-        self._changed()
+        self._refresh_actions()
 
     def on_speed_changed(self, scale):
         if self._loading:
             return
-        self._aura()["speed"] = int(scale.get_value())
-        self._changed()
+        self._aura_settings()["speed"] = int(scale.get_value())
+        self._refresh_actions()
 
     def on_match_zones(self, _button):
-        settings = self._aura()
+        settings = self._aura_settings()
         colours = aura_mod.normalise_colors(settings, cfg.ZONES)
         settings["colors"] = [list(colours[self.zone]) for _ in colours]
         self._sync_keyboard_page()
-        self._changed()
+        self._refresh_actions()
 
-    def on_preview(self, _button):
-        """Push the current colours to the keyboard without saving them."""
-        settings = self._aura()
-        colours = aura_mod.normalise_colors(settings, cfg.ZONES)
-        mode = settings.get("mode", "Static")
-        speed = settings.get("speed")
-
-        def done(_device, error):
-            self._set_busy(False)
-            self.set_status(f"Could not set the colour: {error}" if error
-                            else f"Sent {mode} to the keyboard. Apply to keep it.")
-
-        self._set_busy(True)
-        self.set_status(f"Sending {mode} to the keyboard…")
-        self._in_background(
-            lambda: self.aura.set_colors(colours, mode=mode, speed=speed), done)
+    def on_apply_aura(self, _button):
+        self._save("aura")
+        self._run_section("aura", apply_mod.apply_aura, "the keyboard")
 
     # ------------------------------------------------------- apply / revert
 
-    def _run_apply(self, name, message):
+    def _run_section(self, section, work, what):
+        """Apply one section off the main loop, from the saved copy."""
+        conf = copy.deepcopy(self._disk)
+
+        def run():
+            results = []
+            work(conf, results)
+            return results
+
         def done(results, error):
             self._set_busy(False)
             if error is not None:
-                self.set_status(f"Could not apply {name}: {error}")
+                self.set_status(f"Could not set {what}: {error}")
                 return
             failures = [f"{knob}: {detail}"
                         for knob, state, detail in results if state == "failed"]
             if failures:
-                self.set_status(f"{name} applied with problems: "
-                                + "; ".join(failures))
+                self.set_status("Problems: " + "; ".join(failures))
             else:
-                self.set_status(f"{name} is applied.")
-            self._sync_fan_page()
+                self.set_status(f"Applied to {what}.")
+            if section == "fans":
+                self._sync_fan_page()
             self._tick()
 
         self._set_busy(True)
-        self.set_status(message)
-        self._in_background(lambda: apply_mod.apply_all(name), done)
+        self.set_status(f"Applying to {what}…")
+        self._in_background(run, done)
 
-    def on_apply(self, _button):
-        if self._profile().get("fan_mode") == "curve":
-            for fan, points in self._curves().items():
-                try:
-                    hw.FanCurve.validate(points)
-                except ValueError as exc:
-                    self.set_status(
-                        f"The {FAN_TITLES[fan]} curve cannot be used: {exc}")
-                    return
-        cfg.save(self.config)
-        self._seen_mtime = cfg.mtime()
-        self._disk = copy.deepcopy(self.config)
-        name = self.config.get("active_profile")
-        self._run_apply(name, f"Applying {name}…")
-
-    def on_revert(self, _button):
-        self.config = copy.deepcopy(self._disk)
+    def on_revert(self, _button, section):
+        self.config[section] = copy.deepcopy(self._disk[section])
         self.load_widgets()
         self.set_status("Changes dropped.")
 

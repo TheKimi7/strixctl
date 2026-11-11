@@ -1,7 +1,13 @@
-"""Apply a stored profile to the hardware.
+"""Push the stored settings onto the hardware.
 
 Shared by the CLI, the GUI and the systemd --user unit that restores state at
-login.  Each step is independent: one unwritable knob must not stop the rest.
+login. Each knob has its own function, and each is independent: applying a fan
+curve never touches the keyboard, and a colour change never touches the fans.
+One unwritable knob must not stop the rest, so every step records its own
+result rather than raising.
+
+Results are (knob, state, detail), where state is ok, skipped, unavailable or
+failed.
 """
 
 from . import config as cfg
@@ -10,7 +16,7 @@ from . import hw
 
 def apply_battery(conf, results):
     battery = hw.Battery()
-    settings = conf.get("battery", {})
+    settings = conf.get("battery") or {}
     if not settings.get("enabled"):
         results.append(("battery", "skipped", "limit disabled in config"))
         return
@@ -24,36 +30,35 @@ def apply_battery(conf, results):
         results.append(("battery", "failed", str(exc)))
 
 
-def apply_profile(conf, name, results):
-    prof = cfg.profile(conf, name)
-    if prof is None:
-        results.append(("profile", "failed", f"no profile named {name!r}"))
+def apply_power(conf, results):
+    """The ACPI platform profile: quiet, balanced or performance."""
+    wanted = conf.get("power")
+    if not wanted:
+        results.append(("power", "skipped", "no power mode stored"))
         return
-
     platform = hw.PlatformProfile()
-    wanted = prof.get("platform_profile")
-    if wanted and platform.available:
-        try:
-            platform.profile = wanted
-            results.append(("platform_profile", "ok", wanted))
-        except (OSError, ValueError) as exc:
-            results.append(("platform_profile", "failed", str(exc)))
-
-    # The firmware reloads its own curve when the platform profile changes, so
-    # the custom curve has to go on afterwards, never before.
-    apply_fans(prof, results)
-    apply_aura(conf, prof, results)
+    if not platform.available:
+        results.append(("power", "unavailable", "no platform_profile"))
+        return
+    try:
+        platform.profile = wanted
+        results.append(("power", "ok", wanted))
+    except (OSError, ValueError) as exc:
+        results.append(("power", "failed", str(exc)))
 
 
-def apply_fans(prof, results):
-    """Arm the profile's curves, or hand both fans back to the firmware."""
+def apply_fans(conf, results):
+    """Arm the stored curves, or hand both fans back to the firmware."""
     fans = hw.Fans()
     if not fans.available:
+        results.append(("fans", "unavailable", "no asus_custom_fan_curve hwmon"))
         return
-    if prof.get("fan_mode") == "curve":
+    settings = conf.get("fans") or {}
+    if settings.get("mode") == "curve":
+        stored = cfg.curves(conf)
         for fan, curve in fans:
             try:
-                curve.apply(cfg.points(prof[f"fan_{fan}"]))
+                curve.apply(stored[fan])
                 results.append((f"fan_{fan}", "ok", "curve armed"))
             except (OSError, ValueError, KeyError) as exc:
                 results.append((f"fan_{fan}", "failed", str(exc)))
@@ -65,47 +70,57 @@ def apply_fans(prof, results):
             results.append(("fans", "failed", str(exc)))
 
 
-def apply_aura(conf, prof, results):
+def apply_aura(conf, results):
     # Keyboard brightness is not applied here or anywhere else: the desktop
     # owns it, and the colour write below is sent at the level it holds.
     from . import aura
+
+    settings = conf.get("aura") or {}
+    if not settings:
+        results.append(("kbd_colour", "skipped", "no colour stored"))
+        return
     backend = aura.Aura(settings=conf.get("openrgb"))
-    wanted_aura = prof.get("aura")
-    if wanted_aura and backend.available:
-        try:
-            device = backend.apply(wanted_aura)
-            colors = aura.normalise_colors(wanted_aura, backend.zones)
-            mode = wanted_aura.get("mode", "Static")
-            if not aura.mode_takes_color(mode):
-                detail = mode
-            else:
-                if device is not None and device.is_perkey:
-                    colors = colors[:1]
-                detail = " ".join("#%02x%02x%02x" % tuple(c) for c in colors)
-            results.append(("kbd_colour", "ok", detail))
-        except OSError as exc:
-            results.append(("kbd_colour", "failed", str(exc)))
-    elif wanted_aura:
+    if not backend.available:
         results.append(("kbd_colour", "unavailable", backend.why_unavailable()))
+        return
+    try:
+        device = backend.apply(settings)
+    except OSError as exc:
+        results.append(("kbd_colour", "failed", str(exc)))
+        return
+    mode = settings.get("mode", "Static")
+    if not aura.mode_takes_color(mode):
+        detail = mode
+    else:
+        colors = aura.normalise_colors(settings, backend.zones)
+        if device is not None and device.is_perkey:
+            colors = colors[:1]
+        detail = " ".join("#%02x%02x%02x" % tuple(c) for c in colors)
+    results.append(("kbd_colour", "ok", detail))
 
 
-def rearm_fans(name=None):
-    """Put the profile's fan setting back without touching anything else.
+def rearm_fans(conf=None):
+    """Put the stored fan setting back without touching anything else.
 
     For when the kernel has dropped a custom curve on its own: it does that on
-    every platform profile change, and a resume from sleep can do it too.
+    every power mode change, and a resume from sleep can do it too.
     """
-    conf = cfg.load()
     results = []
-    prof = cfg.profile(conf, name)
-    if prof is not None:
-        apply_fans(prof, results)
+    apply_fans(conf if conf is not None else cfg.load(), results)
     return results
 
 
-def apply_all(name=None):
-    conf = cfg.load()
+def apply_all(conf=None):
+    """Everything, in the order the hardware prefers.
+
+    The power mode goes on before the fans because the firmware reloads its
+    own curve when the mode changes, which would silently drop a custom curve
+    armed beforehand.
+    """
+    conf = cfg.load() if conf is None else conf
     results = []
     apply_battery(conf, results)
-    apply_profile(conf, name or conf.get("active_profile"), results)
+    apply_power(conf, results)
+    apply_fans(conf, results)
+    apply_aura(conf, results)
     return results

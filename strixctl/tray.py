@@ -4,18 +4,21 @@ Uses XApp.StatusIcon rather than AppIndicator because Cinnamon (and XFCE, and
 MATE) speak XApp natively, and gir1.2-xapp-1.0 is already a dependency of a
 Cinnamon desktop -- so this adds nothing to install.
 
+The menu carries the power mode, because that is the one knob worth changing
+without opening a window. Everything else lives in the window.
+
 The tray is also the one long-lived strixctl process, so it does the watching
 that a daemon would otherwise be needed for:
 
-  * A resume from sleep can leave the firmware curve running. The tray notices
-    the wake-up and puts the profile's curve back.
+  * A resume from sleep can leave the firmware curve running, so the tray
+    notices the wake-up and puts the stored fan setting back.
   * The window and the CLI edit the same config file, so the menu is rebuilt
     when that file changes.
 
-It never switches profile on its own: only a click does that.
+It changes nothing on its own beyond that; only a click does.
 
-None of it happens when the tray is not running; curves then stay as the last
-`strixctl apply` left them, as before.
+None of it happens when the tray is not running; the fans then stay as the
+last `strixctl apply` left them, as before.
 """
 
 import threading
@@ -49,6 +52,7 @@ class Tray:
     def __init__(self):
         self.icon = XApp.StatusIcon()
         self.icon.set_icon_name("computer")
+        self.platform = hw.PlatformProfile()
         self._busy = False
         self._note = ""
         self._seen_config = cfg.mtime()
@@ -59,26 +63,35 @@ class Tray:
     def refresh(self):
         conf = cfg.load()
         battery = hw.Battery()
-        active = conf.get("active_profile")
+        fans = hw.Fans()
 
         limit = battery.limit if battery.available else None
-        tooltip = f"strixctl: {active}"
+        tooltip = "strixctl"
+        if self.platform.available:
+            tooltip += f": {self.platform.profile}"
         if limit is not None:
             tooltip += f", charge stop {limit}%"
+        if fans.available:
+            tooltip += (", your fan curve" if all(fans.armed.values())
+                        else ", firmware fan curve")
         if self._note:
             tooltip += f"\n{self._note}"
         self.icon.set_tooltip_text(tooltip)
 
         menu = Gtk.Menu()
-        for name in conf["profiles"]:
-            item = Gtk.CheckMenuItem(label=name)
-            item.set_draw_as_radio(True)
-            item.set_active(name == active)
-            item.set_sensitive(not self._busy)
-            item.connect("activate", self.on_profile, name)
-            menu.append(item)
-
-        menu.append(Gtk.SeparatorMenuItem())
+        if self.platform.available:
+            heading = Gtk.MenuItem(label="Power mode")
+            heading.set_sensitive(False)
+            menu.append(heading)
+            active = self.platform.profile
+            for name in self.platform.choices:
+                item = Gtk.CheckMenuItem(label=f"   {name}")
+                item.set_draw_as_radio(True)
+                item.set_active(name == active)
+                item.set_sensitive(not self._busy and self.platform.writable)
+                item.connect("activate", self.on_power, name)
+                menu.append(item)
+            menu.append(Gtk.SeparatorMenuItem())
 
         if self._note:
             note = Gtk.MenuItem(label=self._note)
@@ -127,24 +140,31 @@ class Tray:
         self.refresh()
         return False
 
-    def switch_to(self, name):
-        conf = cfg.load()
-        if name not in conf["profiles"]:
-            return
-        conf["active_profile"] = name
-        cfg.save(conf)
-        self.refresh()
-        self._run(lambda: apply_mod.apply_all(name), "profile")
+    def on_power(self, item, name):
+        """Set the power mode, then put the stored fan setting back.
 
-    def on_profile(self, item, name):
-        if not item.get_active() or self._busy:
+        The firmware reloads its own curve when the mode changes, so a custom
+        curve has to be re-armed or it silently stops applying.
+        """
+        if not item.get_active() or self._busy or name == self.platform.profile:
             return
-        self.switch_to(name)
+        conf = cfg.load()
+        try:
+            self.platform.profile = name
+        except (OSError, ValueError) as exc:
+            self._note = f"Could not set the power mode: {exc}"
+            self.refresh()
+            return
+        conf["power"] = name
+        cfg.save(conf)
+        self._seen_config = cfg.mtime()
+        self._finished(apply_mod.rearm_fans(conf))
 
     def on_fan_reset(self, _item):
         fans = hw.Fans()
         if fans.available and fans.writable:
             fans.reset()
+            self.refresh()
 
     def on_open(self, _item):
         from .gui import StrixWindow

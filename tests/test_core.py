@@ -82,37 +82,72 @@ V1 = {
                         [70, 95], [76, 128], [80, 158], [80, 158]],
             "fan_gpu": [[35, 49], [35, 49], [44, 152], [51, 152],
                         [56, 152], [63, 208], [70, 255], [70, 255]],
+            "aura": {"mode": "Breathing", "speed": 40, "colors": [[1, 2, 3]] * 4},
+        },
+        "Performance": {
+            "platform_profile": "performance",
+            "fan_mode": "auto",
+            "fan_cpu": [[40, 255]] * 8,
+            "fan_gpu": [[40, 255]] * 8,
         },
     },
 }
 
 
+def _v2():
+    """The same file after the v1 -> v2 step, which is what Kimi's disk holds."""
+    data = copy.deepcopy(V1)
+    cfg._to_v2(data)
+    data["version"] = 2
+    return data
+
+
 class Migrate(unittest.TestCase):
-    def test_v1_becomes_percent_with_a_full_ceiling(self):
+    def test_v1_lands_on_v3_in_percent_with_a_full_ceiling(self):
         data = copy.deepcopy(V1)
-        self.assertTrue(cfg.migrate(data))
-        silent = data["profiles"]["Silent"]
+        self.assertEqual(cfg.migrate(data), 1)
         self.assertEqual(data["version"], cfg.VERSION)
-        self.assertNotIn("kbd_brightness", silent)
-        self.assertEqual(silent["fan_cpu"][:2], [[35, 2], [52, 9]])
-        self.assertEqual(silent["fan_cpu"][-2:], [[80, 62], [90, 100]])
-        self.assertEqual(silent["fan_gpu"][-1], [70, 100])
-        for key in ("fan_cpu", "fan_gpu"):
-            hw.FanCurve.validate(cfg.points(silent[key]))
+        self.assertEqual(data["fans"]["cpu"][:2], [[35, 2], [52, 9]])
+        self.assertEqual(data["fans"]["cpu"][-2:], [[80, 62], [90, 100]])
+        for fan in ("cpu", "gpu"):
+            hw.FanCurve.validate(cfg.points(data["fans"][fan]))
+
+    def test_the_active_profile_is_the_one_that_survives(self):
+        data = _v2()
+        self.assertEqual(cfg.migrate(data), 2)
+        self.assertEqual(data["power"], "quiet")
+        self.assertEqual(data["fans"]["mode"], "curve")
+        self.assertEqual(data["aura"]["mode"], "Breathing")
+        self.assertEqual(data["aura"]["speed"], 40)
+
+    def test_profiles_are_gone_for_good(self):
+        data = _v2()
+        cfg.migrate(data)
+        self.assertNotIn("profiles", data)
+        self.assertNotIn("active_profile", data)
+        # _merge must not put them back from the defaults either.
+        self.assertNotIn("profiles", cfg._merge(cfg.DEFAULTS, data))
+
+    def test_a_missing_active_profile_still_yields_settings(self):
+        data = _v2()
+        data["active_profile"] = "Gone"
+        cfg.migrate(data)
+        self.assertIn(data["power"], ("quiet", "performance"))
+        for fan in ("cpu", "gpu"):
+            hw.FanCurve.validate(cfg.points(data["fans"][fan]))
 
     def test_migrating_twice_changes_nothing(self):
         data = copy.deepcopy(V1)
         cfg.migrate(data)
         again = copy.deepcopy(data)
-        self.assertFalse(cfg.migrate(again))
+        self.assertEqual(cfg.migrate(again), 0)
         self.assertEqual(again, data)
 
     def test_shipped_defaults_are_valid(self):
-        self.assertFalse(cfg.migrate(copy.deepcopy(cfg.DEFAULTS)))
-        for prof in cfg.DEFAULTS["profiles"].values():
-            self.assertNotIn("kbd_brightness", prof)
-            for key in ("fan_cpu", "fan_gpu"):
-                hw.FanCurve.validate(cfg.points(prof[key]))
+        self.assertEqual(cfg.migrate(copy.deepcopy(cfg.DEFAULTS)), 0)
+        self.assertNotIn("profiles", cfg.DEFAULTS)
+        for fan in ("cpu", "gpu"):
+            hw.FanCurve.validate(cfg.points(cfg.DEFAULTS["fans"][fan]))
 
 
 LISTING = """\

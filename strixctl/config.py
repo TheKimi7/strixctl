@@ -1,20 +1,23 @@
-"""User configuration: the battery limit plus named profiles.
+"""User configuration: the fan curves, the keyboard colour, and the two
+machine-wide knobs (power mode and charge limit).
 
 Lives in ~/.config/strixctl/config.json so the whole thing stays writable
-without root.  A profile bundles everything you would switch at once: the
-platform profile, both fan curves and the keyboard colour.
+without root.
 
-Keyboard brightness is deliberately not in here. The desktop owns it.
+Every setting here is independent. There are no named profiles: the fans know
+nothing about the keyboard, and changing one never writes the other.
 
 Format versions
 ---------------
-1 (no "version" key): fan points were (temp, pwm 0-255) and profiles carried a
-  kbd_brightness.
+1 (no "version" key): fan points were (temp, pwm 0-255), and everything was
+  bundled into named profiles (Silent/Balanced/Performance), each carrying its
+  own curves, colour and keyboard brightness.
 2: fan points are (temp, percent 0-100), the last point of every curve is 100,
-  and kbd_brightness is gone.
+  and kbd_brightness is gone. Still bundled into profiles.
+3: no profiles. One fan curve, one keyboard colour, one power mode.
 
-A version 1 file is converted when it is first loaded, and the original is
-kept beside it as config.v1.json.
+An older file is converted the first time it is loaded, and the original is
+kept beside it as config.v1.json or config.v2.json.
 """
 
 import copy
@@ -25,7 +28,7 @@ import time
 
 from . import hw
 
-VERSION = 2
+VERSION = 3
 
 CONFIG_DIR = os.path.join(
     os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")), "strixctl")
@@ -35,22 +38,16 @@ CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
 warnings = []
 
 #: The G712LU's balanced firmware curves in percent, the seed for a fresh
-#: config. They are only a starting shape: "Load firmware curve" reads the real
-#: one for whichever platform profile is in force.
+#: config. They are only a starting shape: "Start from the firmware curve"
+#: reads the real one for whichever power mode is in force.
 STOCK_CPU = [(35, 3), (52, 12), (58, 23), (64, 36),
              (70, 50), (76, 67), (80, 83), (80, 83)]
 STOCK_GPU = [(35, 15), (35, 15), (45, 23), (50, 34),
              (56, 46), (63, 63), (70, 80), (70, 80)]
 
 
-def _scaled(points, factor, floor=0):
-    out = []
-    last = -1
-    for temp, percent in points:
-        value = max(floor, min(100, int(round(percent * factor))), last)
-        out.append((temp, value))
-        last = value
-    return [list(point) for point in hw.with_full_ceiling(out)]
+def _listed(points):
+    return [list(point) for point in hw.with_full_ceiling(points)]
 
 
 #: The G712 chassis is 4-zone, left to right.
@@ -61,36 +58,13 @@ DEFAULTS = {
     "battery": {"limit": 80, "enabled": False},
     # null means "search the usual places"; see aura.CANDIDATE_BINARIES.
     "openrgb": {"binary": None, "device_index": None},
-    "active_profile": "Balanced",
-    "profiles": {
-        "Silent": {
-            "platform_profile": "quiet",
-            "fan_mode": "curve",
-            "fan_cpu": _scaled(STOCK_CPU, 0.75),
-            "fan_gpu": _scaled(STOCK_GPU, 0.75),
-            "aura": {"mode": "Static", "speed": 50,
-                     "colors": [[0, 80, 255]] * 4},
-        },
-        "Balanced": {
-            "platform_profile": "balanced",
-            "fan_mode": "auto",
-            "fan_cpu": _scaled(STOCK_CPU, 1),
-            "fan_gpu": _scaled(STOCK_GPU, 1),
-            "aura": {"mode": "Static", "speed": 50,
-                     "colors": [[255, 255, 255]] * 4},
-        },
-        "Performance": {
-            "platform_profile": "performance",
-            "fan_mode": "curve",
-            "fan_cpu": _scaled(STOCK_CPU, 1.3, floor=15),
-            "fan_gpu": _scaled(STOCK_GPU, 1.3, floor=15),
-            # A gradient across the four zones, so the zone layout is visible
-            # the first time someone switches to this profile.
-            "aura": {"mode": "Static", "speed": 50,
-                     "colors": [[255, 0, 0], [255, 60, 0],
-                                [255, 120, 0], [255, 180, 0]]},
-        },
-    },
+    # null means "leave the power mode wherever it is"; nothing is forced on a
+    # machine whose owner has never picked one.
+    "power": None,
+    "fans": {"mode": "auto",
+             "cpu": _listed(STOCK_CPU),
+             "gpu": _listed(STOCK_GPU)},
+    "aura": {"mode": "Static", "speed": 50, "colors": [[255, 255, 255]] * ZONES},
 }
 
 
@@ -104,10 +78,8 @@ def _merge(base, override):
     return out
 
 
-def migrate(data):
-    """Bring a parsed config up to VERSION in place. Returns True if it changed."""
-    if not isinstance(data, dict) or data.get("version", 1) >= VERSION:
-        return False
+def _to_v2(data):
+    """Fan points from the kernel's 0-255 to percent, and no brightness."""
     for prof in (data.get("profiles") or {}).values():
         if not isinstance(prof, dict):
             continue
@@ -116,20 +88,59 @@ def migrate(data):
             if key not in prof:
                 continue
             try:
-                converted = [(int(t), hw.pwm_to_pct(p)) for t, p in prof[key]]
+                prof[key] = _listed([(int(t), hw.pwm_to_pct(p)) for t, p in prof[key]])
             except (TypeError, ValueError):
                 continue
-            prof[key] = [list(point) for point in hw.with_full_ceiling(converted)]
+
+
+def _to_v3(data):
+    """Flatten the active profile out into plain settings, and drop the rest."""
+    profiles = data.pop("profiles", None) or {}
+    name = data.pop("active_profile", None)
+    prof = profiles.get(name)
+    if not isinstance(prof, dict):
+        prof = next((p for p in profiles.values() if isinstance(p, dict)), {})
+    data["power"] = prof.get("platform_profile")
+    curves = {}
+    for fan, stock in (("cpu", STOCK_CPU), ("gpu", STOCK_GPU)):
+        raw = prof.get(f"fan_{fan}")
+        try:
+            curves[fan] = _listed([(int(t), int(p)) for t, p in raw])
+        except (TypeError, ValueError):
+            curves[fan] = _listed(stock)
+    data["fans"] = {"mode": "curve" if prof.get("fan_mode") == "curve" else "auto",
+                    **curves}
+    if isinstance(prof.get("aura"), dict):
+        data["aura"] = prof["aura"]
+
+
+def migrate(data):
+    """Bring a parsed config up to VERSION in place.
+
+    Returns the version it started at, or 0 when there was nothing to do.
+    """
+    if not isinstance(data, dict):
+        return 0
+    start = data.get("version", 1)
+    if not isinstance(start, int) or start >= VERSION:
+        return 0
+    if start < 2:
+        _to_v2(data)
+    if start < 3:
+        _to_v3(data)
     data["version"] = VERSION
-    return True
+    return start
 
 
 def _set_aside(name):
     """Copy the file on disk out of the way; returns the copy's path or None."""
     target = os.path.join(CONFIG_DIR, name)
     try:
-        if not os.path.exists(target):
-            shutil.copy2(CONFIG_PATH, target)
+        if os.path.exists(target):
+            stamp = time.strftime("%Y%m%d-%H%M%S")
+            root, ext = os.path.splitext(target)
+            target = f"{root}.{stamp}{ext}"
+        shutil.copy2(CONFIG_PATH, target)
         return target
     except OSError:
         return None
@@ -155,13 +166,21 @@ def load():
             + (f" The unreadable file was copied to {kept}." if kept else ""))
         return copy.deepcopy(DEFAULTS)
 
-    if migrate(data):
-        kept = _set_aside("config.v1.json")
+    # Read before migrating: _to_v3 takes these away.
+    was_named = data.get("active_profile")
+    started_at = migrate(data)
+    if started_at:
+        kept = _set_aside(f"config.v{started_at}.json")
+        note = []
+        if started_at < 2:
+            note.append("Fan speeds are percent now.")
+        if was_named:
+            note.append(f"Profiles are gone, so the settings from {was_named} "
+                        "are now simply the settings.")
+        note.append(f"The old file is at {kept}." if kept else "")
         try:
             save(data)
-            warnings.append(
-                "Config converted to percent fan speeds; every curve now ends "
-                "at 100%." + (f" The old file is at {kept}." if kept else ""))
+            warnings.append(" ".join(part for part in note if part))
         except OSError:
             pass
     return _merge(DEFAULTS, data)
@@ -184,9 +203,10 @@ def mtime():
         return 0
 
 
-def profile(config, name=None):
-    name = name or config.get("active_profile")
-    return config["profiles"].get(name)
+def curves(config):
+    """Both stored curves as [(temp, percent), ...], keyed by fan."""
+    fans = config.get("fans") or {}
+    return {fan: points(fans.get(fan) or []) for fan in ("cpu", "gpu")}
 
 
 def points(raw):

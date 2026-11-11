@@ -79,12 +79,11 @@ def cmd_status(args):
     aura = aura_mod.Aura(settings=conf.get("openrgb"))
 
     print(f"strixctl -- {hw.board_name()}")
-    print(f"  active profile       {conf.get('active_profile')}")
     print()
     print(_state_line("battery limit",
                       battery.available, battery.writable,
                       f"{battery.limit}%" if battery.limit else "?"))
-    print(_state_line("platform profile",
+    print(_state_line("power mode",
                       platform.available, platform.writable, platform.profile))
     print(_state_line("fan curves",
                       fans.available, fans.writable,
@@ -118,9 +117,7 @@ def cmd_status(args):
     return 0
 
 
-def cmd_apply(args):
-    results = apply_mod.apply_all(args.profile)
-    _print_warnings()
+def _report(results):
     failed = 0
     for knob, state, detail in results:
         marker = {"ok": "+", "skipped": ".", "unavailable": ".", "failed": "!"}[state]
@@ -130,19 +127,37 @@ def cmd_apply(args):
     return 1 if failed else 0
 
 
-def cmd_profile(args):
-    conf = cfg.load()
-    if not args.name:
-        for name in conf["profiles"]:
-            marker = "*" if name == conf.get("active_profile") else " "
-            print(f"{marker} {name}")
-        return 0
-    if args.name not in conf["profiles"]:
-        print(f"no profile named {args.name!r}", file=sys.stderr)
+def cmd_apply(args):
+    """Everything that is stored, which is what the login unit runs."""
+    results = apply_mod.apply_all()
+    _print_warnings()
+    return _report(results)
+
+
+def cmd_power(args):
+    """Set the power mode, and put the fan setting back afterwards.
+
+    The firmware reloads its own curve whenever the mode changes, so a custom
+    curve has to be re-armed or it silently stops applying.
+    """
+    platform = hw.PlatformProfile()
+    if not platform.available:
+        print("no platform_profile on this machine", file=sys.stderr)
         return 1
-    conf["active_profile"] = args.name
+    if not args.mode:
+        for name in platform.choices:
+            print(f"{'*' if name == platform.profile else ' '} {name}")
+        return 0
+    conf = cfg.load()
+    try:
+        platform.profile = args.mode
+    except (OSError, ValueError) as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    conf["power"] = args.mode
     cfg.save(conf)
-    return cmd_apply(argparse.Namespace(profile=args.name))
+    print(f"power mode {args.mode}")
+    return _report(apply_mod.rearm_fans(conf))
 
 
 def cmd_battery(args):
@@ -302,9 +317,9 @@ def cmd_colour(args):
         return 1
     colors = aura_mod.normalise_colors({"colors": colors}, aura.zones)
 
-    prof_aura = (cfg.profile(conf) or {}).get("aura", {})
-    mode = args.mode or prof_aura.get("mode", "Static")
-    speed = args.speed if args.speed is not None else prof_aura.get("speed")
+    stored = conf.get("aura") or {}
+    mode = args.mode or stored.get("mode", "Static")
+    speed = args.speed if args.speed is not None else stored.get("speed")
     try:
         device = aura.set_colors(colors, mode=mode, speed=speed)
     except OSError as exc:
@@ -321,14 +336,13 @@ def cmd_colour(args):
     print(f"set {detail} -> {device}")
 
     if args.save:
-        prof = cfg.profile(conf)
-        stored = prof.setdefault("aura", {})
+        stored = conf.setdefault("aura", {})
         stored["colors"] = colors
         stored["mode"] = mode
         if speed is not None:
             stored["speed"] = speed
         cfg.save(conf)
-        print(f"saved to profile {conf['active_profile']}")
+        print(f"saved to {cfg.CONFIG_PATH}")
     return 0
 
 
@@ -375,11 +389,12 @@ def build_parser():
 
     sub.add_parser("status", help="show every knob and whether it is writable")
 
-    p_apply = sub.add_parser("apply", help="apply the saved profile")
-    p_apply.add_argument("profile", nargs="?", help="profile name (default: active)")
+    sub.add_parser("apply", help="apply every saved setting")
 
-    p_profile = sub.add_parser("profile", help="list or switch profiles")
-    p_profile.add_argument("name", nargs="?")
+    p_power = sub.add_parser(
+        "power", help="set the power mode, or list the modes this machine has")
+    p_power.add_argument("mode", nargs="?",
+                         help="quiet, balanced or performance")
 
     p_battery = sub.add_parser("battery", help="set the charge limit, or 'off'")
     p_battery.add_argument("limit", help="percent (20-100) or 'off'")
@@ -400,7 +415,7 @@ def build_parser():
     p_colour.add_argument("--speed", type=int, default=None,
                           help="0-100, for effects that animate")
     p_colour.add_argument("--save", action="store_true",
-                          help="also store them in the active profile")
+                          help="also store them in config.json")
     sub.add_parser("gui", help="launch the GTK window")
     sub.add_parser("tray", help="run the Cinnamon tray icon")
     return parser
@@ -410,7 +425,7 @@ def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
     handlers = {
-        "status": cmd_status, "apply": cmd_apply, "profile": cmd_profile,
+        "status": cmd_status, "apply": cmd_apply, "power": cmd_power,
         "battery": cmd_battery, "fans": cmd_fans,
         "colour": cmd_colour, "gui": cmd_gui, "tray": cmd_tray,
     }
