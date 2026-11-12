@@ -28,7 +28,6 @@ size and spacing: colours and fonts come from the desktop theme.
 import copy
 import threading
 
-import cairo
 import gi
 
 # Both must be pinned. `from gi.repository import Gdk, Gtk` resolves Gdk first,
@@ -45,30 +44,8 @@ from . import hw
 from . import theme
 from .colorwheel import ColorEditor
 
-#: Used only when the NeoPOP skin is off; with it on the curves are
-#: monochrome and told apart by theme.CURVE_DASH instead.
-CURVE_COLORS = {"cpu": (0.20, 0.55, 0.95), "gpu": (0.95, 0.45, 0.15)}
-
-#: Set once, by the window, before anything is drawn. The cairo widgets read
-#: it at draw time to decide whether to paint in colour or in ink.
-SKIN = False
 FAN_TITLES = {"cpu": "CPU fan", "gpu": "GPU fan"}
 CHARGE_CHOICES = (60, 80, 100)
-
-#: The plain look, for `"theme": "system"` in config.json. The skin's own
-#: stylesheet lives in theme.py.
-PLAIN_CSS = b"""
-.strix-tile { padding: 10px 14px; border: 1px solid alpha(@theme_fg_color, 0.14);
-              border-radius: 6px; }
-.strix-title { font-size: 170%; font-weight: bold; }
-.strix-subtitle { font-size: 85%; opacity: 0.6; }
-.strix-tile-title { font-size: 85%; opacity: 0.6; }
-.strix-tile-value { font-size: 170%; font-weight: bold; }
-.strix-tile-sub { font-size: 85%; opacity: 0.6; }
-.strix-heading { font-weight: bold; }
-.strix-dim { opacity: 0.6; }
-.strix-point entry { min-width: 0; padding-left: 4px; padding-right: 4px; }
-"""
 
 
 def clamp_point(points, index, temp, percent):
@@ -111,94 +88,6 @@ def _label(text="", *classes, xalign=0, wrap=False):
     return label
 
 
-#: States in which a plate is flush with the page, so it has no planes.
-_FLUSH = (Gtk.StateFlags.ACTIVE | Gtk.StateFlags.CHECKED
-          | Gtk.StateFlags.INSENSITIVE)
-
-
-def _face_of(widget):
-    """(fill, flush) for a plate: which face colour, and is it pressed in.
-
-    Holding a plate only moves it, as in the reference. Turning the face over
-    means something else: this plate is the chosen one, or the one that acts.
-    """
-    style = widget.get_style_context()
-    if style.has_class("strix-tile"):
-        return theme.PLATE_FILL["card"], False
-    flags = widget.get_state_flags()
-    held = bool(flags & Gtk.StateFlags.ACTIVE)
-    if flags & Gtk.StateFlags.INSENSITIVE:
-        return theme.PLATE_FILL["off"], True
-    if flags & Gtk.StateFlags.CHECKED:
-        return theme.PLATE_FILL["down"], True
-    if style.has_class("suggested-action"):
-        return theme.PLATE_FILL["down"], held
-    return theme.PLATE_FILL["rest"], held
-
-
-def _plate_draw(widget, cr):
-    """Paint a plate: the face, and the two planes that stand it up.
-
-    Runs before GTK draws the widget, so the label lands on top of the face.
-    Both planes are the reference's 45 degree shear, which falls out of
-    starting the plane's far edge `edge` pixels further down (the right one)
-    or along (the bottom one). They meet on the diagonal through the corner,
-    so the corner is mitred rather than painted twice.
-
-    Pressed, the face moves into the space the planes were in and they are
-    not drawn at all, which is what makes a pressed plate read as flush.
-    """
-    edge = theme.EDGE
-    width, height = widget.get_allocated_width(), widget.get_allocated_height()
-    right, bottom = width - edge, height - edge
-    if right <= 0 or bottom <= 0:
-        return False
-    face, flush = _face_of(widget)
-    cr.set_source_rgb(*face)
-    if flush:
-        cr.rectangle(edge, edge, right, bottom)
-        cr.fill()
-        return False
-    cr.rectangle(0, 0, right, bottom)
-    cr.fill()
-    cr.set_source_rgb(*theme.POP_FILL["bottom"])
-    cr.move_to(0, bottom)
-    cr.line_to(right, bottom)
-    cr.line_to(width, height)
-    cr.line_to(edge, height)
-    cr.close_path()
-    cr.fill()
-    cr.set_source_rgb(*theme.POP_FILL["right"])
-    cr.move_to(right, 0)
-    cr.line_to(width, edge)
-    cr.line_to(width, height)
-    cr.line_to(right, bottom)
-    cr.close_path()
-    cr.fill()
-    return False
-
-
-def plate(widget, big=False):
-    """Make a widget a NeoPOP plate, drawn rather than themed.
-
-    The face has to be drawn rather than left to CSS: GTK3 clips a widget's
-    drawing to its CSS margin box, so a plate that reserved room for the
-    planes with a margin could not then reach it. Instead the plate fills its
-    whole allocation, the planes take the last `theme.EDGE` pixels of it, and
-    the stylesheet pads the label inwards by the same amount.
-
-    A no-op when the skin is off, so call sites never have to ask.
-    """
-    if not SKIN:
-        return widget
-    style = widget.get_style_context()
-    style.add_class("strix-pop")
-    if big:
-        style.add_class("strix-big")       # the reference's size="big"
-    widget.connect("draw", _plate_draw)
-    return widget
-
-
 class Choice(Gtk.Box):
     """A row of joined buttons of which exactly one is down.
 
@@ -208,11 +97,10 @@ class Choice(Gtk.Box):
     """
 
     def __init__(self, on_pick=None):
-        # Joined into one block under the desktop theme, but spaced apart
-        # under the skin, where every plate stands up on its own planes.
-        super().__init__(spacing=6 if SKIN else 0)
-        if not SKIN:
-            self.get_style_context().add_class("linked")
+        # "linked" is the GTK theme's own segmented control: one block of
+        # joined buttons, with the rounding only on the two ends.
+        super().__init__(spacing=0)
+        self.get_style_context().add_class("linked")
         self.on_pick = on_pick
         self._buttons = {}
         self._quiet = False
@@ -229,7 +117,6 @@ class Choice(Gtk.Box):
             for key, text in options:
                 button = Gtk.RadioButton.new_with_label_from_widget(first, text)
                 button.set_mode(False)
-                plate(button)
                 first = first or button
                 button.connect("toggled", self._on_toggled, key)
                 self.pack_start(button, False, False, 0)
@@ -265,7 +152,6 @@ class Tile(Gtk.Box):
     def __init__(self, title):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         self.get_style_context().add_class("strix-tile")
-        plate(self)             # a card stands up the same way a button does
         self.value = _label("–", "strix-tile-value")
         self.value.set_ellipsize(Pango.EllipsizeMode.END)
         self.sub = _label("", "strix-tile-sub")
@@ -410,14 +296,16 @@ class CurvePlot(Gtk.DrawingArea):
 
     # ------------------------------------------------------------- painting
 
-    @staticmethod
-    def _ink(cr, fan, alpha):
-        """Set the colour and dash for one fan's line."""
-        if SKIN:
-            cr.set_source_rgba(*theme.PLOT["line"], alpha)
-            cr.set_dash(theme.CURVE_DASH[fan])
-        else:
-            cr.set_source_rgba(*CURVE_COLORS[fan], alpha)
+    def _ink(self, cr, fan, alpha):
+        """Set the colour and dash for one fan's line.
+
+        Both curves are the theme's own foreground colour, so the dash is
+        what tells them apart. Two hues would be prettier and would also be
+        the only decoration in the window.
+        """
+        fg = self.get_style_context().get_color(Gtk.StateFlags.NORMAL)
+        cr.set_source_rgba(fg.red, fg.green, fg.blue, alpha)
+        cr.set_dash(theme.CURVE_DASH[fan])
 
     def on_draw(self, _widget, cr):
         left, top, width, height = self._plot_area()
@@ -470,7 +358,7 @@ class CurvePlot(Gtk.DrawingArea):
             if not points:
                 continue
             front = fan == self.selected or not self.editable
-            alpha = 1.0 if front else (0.5 if SKIN else 0.35)
+            alpha = 1.0 if front else 0.45
             self._ink(cr, fan, alpha)
             cr.set_line_width(2.5 if front else 1.5)
             for index, (temp, percent) in enumerate(points):
@@ -479,38 +367,27 @@ class CurvePlot(Gtk.DrawingArea):
             cr.stroke()
             cr.set_dash([])
             if front and self.editable:
-                # Square handles, to match the plates everywhere else.
                 for index, (temp, percent) in enumerate(points):
                     x, y = self._to_xy(temp, percent)
                     size = 11 if index in (self._drag, self._hover) else 7
-                    if SKIN:
-                        cr.rectangle(x - size / 2, y - size / 2, size, size)
-                    else:
-                        cr.arc(x, y, size / 2, 0, 6.2832)
+                    cr.arc(x, y, size / 2, 0, 6.2832)
                     cr.fill()
             if show_now:
                 x, y = self._to_xy(self.temp_now, speed_at(points, self.temp_now))
-                if SKIN:
-                    cr.set_source_rgba(*theme.PLOT["line"], alpha)
-                    cr.rectangle(x - 6, y - 6, 12, 12)
-                    cr.fill()
-                    cr.set_source_rgb(*_rgb(theme.INK["page"]))
-                    cr.rectangle(x - 3, y - 3, 6, 6)
-                    cr.fill()
-                else:
-                    cr.set_source_rgba(fg.red, fg.green, fg.blue, alpha)
-                    cr.arc(x, y, 6, 0, 6.2832)
-                    cr.fill()
-                    cr.set_source_rgba(*CURVE_COLORS[fan], alpha)
-                    cr.arc(x, y, 3.5, 0, 6.2832)
-                    cr.fill()
+                # A ring, so the dot reads as "here" rather than as a
+                # ninth point you could drag.
+                bg = self.get_style_context().get_background_color(
+                    Gtk.StateFlags.NORMAL)
+                cr.set_source_rgba(fg.red, fg.green, fg.blue, alpha)
+                cr.arc(x, y, 6, 0, 6.2832)
+                cr.fill()
+                cr.set_source_rgba(bg.red, bg.green, bg.blue, alpha)
+                cr.arc(x, y, 3.5, 0, 6.2832)
+                cr.fill()
 
         # Legend. The sample is drawn with the curve's own line style, so a
         # monochrome graph still says which line is which.
         cr.set_font_size(11)
-        if SKIN and theme.HEAVY:
-            cr.select_font_face(theme.HEAVY, cairo.FONT_SLANT_NORMAL,
-                                cairo.FONT_WEIGHT_BOLD)
         x = left
         for fan in ("cpu", "gpu"):
             speed = self.rpm.get(fan)
@@ -588,10 +465,7 @@ class KeyboardStrip(Gtk.DrawingArea):
             # which stays visible whatever colour the zone is set to.
             x = self.active * (span + gap)
             cr.set_line_width(3)
-            if SKIN:
-                cr.set_source_rgba(*theme.PLOT["line"], dim)
-            else:
-                cr.set_source_rgba(fg.red, fg.green, fg.blue, dim)
+            cr.set_source_rgba(fg.red, fg.green, fg.blue, dim)
             cr.rectangle(x + 1.5, 1.5, span - 3, height - 3)
             cr.stroke()
             cr.set_line_width(1)
@@ -599,12 +473,6 @@ class KeyboardStrip(Gtk.DrawingArea):
             cr.rectangle(x + 3.5, 3.5, span - 7, height - 7)
             cr.stroke()
         return False
-
-
-def _rgb(value):
-    """"#rrggbb" as the 0-1 triple cairo wants."""
-    value = value.lstrip("#")
-    return tuple(int(value[i:i + 2], 16) / 255 for i in (0, 2, 4))
 
 
 def _hue(position):
@@ -621,21 +489,14 @@ class StrixWindow(Gtk.Window):
 
     def __init__(self):
         super().__init__(title="strixctl")
-        self.set_default_size(720, 700)
+        self.set_default_size(720, 640)
 
         self.config = cfg.load()
         startup_notes = list(cfg.warnings)
 
-        # Before any widget exists: the skin loads fonts, and Pango caches
-        # its font map the moment something is measured.
-        global SKIN
-        SKIN = theme.apply(self.config)
-        provider = Gtk.CssProvider()
-        provider.load_from_data(PLAIN_CSS)
-        Gtk.StyleContext.add_provider_for_screen(
-            Gdk.Screen.get_default(), provider,
-            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
-            - (1 if SKIN else 0))
+        # Before any widget exists: a style provider only reaches widgets
+        # that are built after it is installed.
+        theme.apply(self.config)
         self._disk = copy.deepcopy(self.config)
         self._seen_mtime = cfg.mtime()
         self.battery = hw.Battery()
@@ -670,8 +531,6 @@ class StrixWindow(Gtk.Window):
         switcher = Gtk.StackSwitcher()
         switcher.set_stack(self.stack)
         switcher.set_halign(Gtk.Align.START)
-        for tab in switcher.get_children():
-            plate(tab)          # the switcher builds its own buttons
         switcher.set_margin_start(14)
         outer.pack_start(switcher, False, False, 0)
         outer.pack_start(self.stack, True, True, 0)
@@ -769,10 +628,8 @@ class StrixWindow(Gtk.Window):
         apply_button = Gtk.Button(label=apply_label)
         apply_button.get_style_context().add_class("suggested-action")
         apply_button.connect("clicked", on_apply)
-        plate(apply_button, big=True)
         revert = Gtk.Button(label="Revert")
         revert.connect("clicked", self.on_revert, section)
-        plate(revert, big=True)
         row.pack_end(apply_button, False, False, 0)
         row.pack_end(revert, False, False, 0)
         row.pack_end(note, True, True, 4)
@@ -811,7 +668,6 @@ class StrixWindow(Gtk.Window):
         edit_fans = Gtk.Button(label="Edit the curve")
         edit_fans.connect("clicked",
                           lambda *_: self.stack.set_visible_child_name("fans"))
-        plate(edit_fans)
         grid.attach(edit_fans, 2, 1, 1, 1)
 
         grid.attach(_label("Keyboard", "strix-heading"), 0, 2, 1, 1)
@@ -820,7 +676,6 @@ class StrixWindow(Gtk.Window):
         edit_kbd = Gtk.Button(label="Edit the colour")
         edit_kbd.connect("clicked",
                          lambda *_: self.stack.set_visible_child_name("keyboard"))
-        plate(edit_kbd)
         grid.attach(edit_kbd, 2, 2, 1, 1)
 
         grid.attach(_label("Battery", "strix-heading"), 0, 3, 1, 1)
@@ -876,10 +731,8 @@ class StrixWindow(Gtk.Window):
         stock.set_tooltip_text(
             "Replace both curves with the firmware's own, as a starting shape.")
         stock.connect("clicked", self.on_load_stock)
-        plate(stock)
         self.numbers_toggle = Gtk.ToggleButton(label="Edit as numbers")
         self.numbers_toggle.connect("toggled", self.on_numbers_toggled)
-        plate(self.numbers_toggle)
         self.fan_tools.pack_start(stock, False, False, 0)
         self.fan_tools.pack_start(self.numbers_toggle, False, False, 0)
         page.pack_start(self.fan_tools, False, False, 0)
@@ -955,7 +808,6 @@ class StrixWindow(Gtk.Window):
         self.match_button = Gtk.Button(label="Use this colour on every zone")
         self.match_button.set_halign(Gtk.Align.START)
         self.match_button.connect("clicked", self.on_match_zones)
-        plate(self.match_button)
         side.pack_start(self.match_button, False, False, 0)
         body.pack_start(side, False, False, 0)
         page.pack_start(body, False, False, 0)

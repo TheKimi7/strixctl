@@ -58,8 +58,9 @@ DEFAULTS = {
     "battery": {"limit": 80, "enabled": False},
     # null means "search the usual places"; see aura.CANDIDATE_BINARIES.
     "openrgb": {"binary": None, "device_index": None},
-    # "neopop" or "system"; see theme.py.
-    "theme": "neopop",
+    # "monochrome" (the default, and what any older value means) or
+    # "system", which leaves the desktop's accent colour alone; see theme.py.
+    "theme": "monochrome",
     # null means "leave the power mode wherever it is"; nothing is forced on a
     # machine whose owner has never picked one.
     "power": None,

@@ -214,82 +214,33 @@ class OpenRGB(unittest.TestCase):
             self.backend.set_colors([[0, 0, 255]] * 4, mode="Static")
 
 
-#: The greys DESIGN.md bans by name, so the skin cannot drift onto one of the
-#: framework defaults. Pure black and white are not among them: the palette is
-#: meant to be black and white, and so is the reference it follows.
-BANNED_COLOURS = {"#09090b", "#18181b", "#27272a", "#71717a", "#a1a1aa",
-                  "#fafafa"}
+class Look(unittest.TestCase):
+    """The window should look like the desktop, not like a brand."""
 
-
-class Skin(unittest.TestCase):
-    def test_it_can_be_switched_off(self):
+    def test_the_greys_can_be_switched_off(self):
         self.assertTrue(theme.wanted({}))
+        self.assertTrue(theme.wanted({"theme": "monochrome"}))
+        # The old spelling means the default, so a config written by an
+        # earlier version keeps working without a migration.
         self.assertTrue(theme.wanted({"theme": "neopop"}))
         self.assertFalse(theme.wanted({"theme": "system"}))
         self.assertFalse(theme.wanted({"theme": "System"}))
 
-    def test_the_palette_is_its_own(self):
-        values = {v.lower() for v in theme.INK.values()}
-        self.assertFalse(values & BANNED_COLOURS)
-        for value in values:
-            self.assertRegex(value, r"^#[0-9a-f]{6}$")
-
-    def test_the_plate_matches_the_reference(self):
-        # @cred/neopop-web's elevated button, primary, dark: a 3px edge, a
-        # lit plane down the right and a dark one along the bottom.
-        self.assertEqual(theme.EDGE, 3)
-        self.assertEqual(theme.POP, {"right": "#8a8a8a", "bottom": "#3d3d3d"})
-        self.assertEqual(theme.triple("#ffffff"), (1.0, 1.0, 1.0))
-        self.assertEqual(theme.triple("#000000"), (0.0, 0.0, 0.0))
-        for fill in theme.POP_FILL.values():
-            self.assertTrue(all(0.0 <= part <= 1.0 for part in fill))
-
-    def test_the_press_only_moves_the_padding(self):
+    def test_nothing_is_hard_coded_to_a_colour(self):
+        # Every colour is mixed from the theme's own foreground and
+        # background, which is what keeps this right on a light theme as
+        # well as a dark one. A hex value anywhere would break that.
         css = theme.stylesheet().decode()
-        # Pressing swaps the padding rather than resizing anything: the plate
-        # drops into the space the planes stood in and the allocation holds,
-        # so nothing around it reflows.
-        self.assertIn("padding: 0 19px 3px 16px", css)
-        self.assertIn("padding: 3px 16px 0 19px", css)
-        # Every pair has to move the same total, or the plate would change
-        # size as it is pressed.
-        for rest, down in re.findall(
-                r"padding: 0 (\d+)px 3px (\d+)px", css):
-            self.assertEqual(int(rest) - int(down), theme.EDGE)
-        # Plate rules are scoped: a button that was never given planes must
-        # not get a label sitting off centre, so the one unscoped `button`
-        # rule sets colours and nothing else.
-        unscoped = re.search(r"\nbutton \{(.*?)\}", css, re.S)
-        self.assertIsNotNone(unscoped)
-        for property_ in ("padding", "margin", "min-height"):
-            self.assertNotIn(property_, unscoped.group(1))
-        self.assertIn("button.strix-pop {", css)
-        self.assertIn("button.strix-pop.strix-big", css)
+        self.assertEqual(re.findall(r"#[0-9a-fA-F]{3,8}", css), [])
+        self.assertIn("@theme_fg_color", css)
+        self.assertIn("@theme_bg_color", css)
 
-    def test_a_plate_face_is_defined_for_every_state(self):
-        self.assertEqual(set(theme.PLATE), {"rest", "down", "off", "card"})
-        self.assertEqual(set(theme.PLATE_FILL), set(theme.PLATE))
-        self.assertEqual(theme.PLATE["down"], theme.INK["paper"])
-
-    def test_the_stylesheet_builds_without_fonts(self):
-        heavy, title = theme.HEAVY, theme.TITLE
-        try:
-            theme.HEAVY = theme.TITLE = ""
-            css = theme.stylesheet().decode()
-            self.assertIn("font-family: inherit", css)
-            self.assertNotIn("%(", css)
-        finally:
-            theme.HEAVY, theme.TITLE = heavy, title
-
-    def test_the_stylesheet_names_a_loaded_font(self):
-        heavy, title = theme.HEAVY, theme.TITLE
-        try:
-            theme.HEAVY, theme.TITLE = "Gilroy", "Cirka"
-            css = theme.stylesheet().decode()
-            self.assertIn('font-family: "Gilroy"', css)
-            self.assertIn('font-family: "Cirka"', css)
-        finally:
-            theme.HEAVY, theme.TITLE = heavy, title
+    def test_switching_the_greys_off_keeps_the_sizes(self):
+        plain = theme.stylesheet({"theme": "system"}).decode()
+        self.assertIn(".strix-tile-value", plain)
+        self.assertNotIn("theme_selected_bg_color", plain)
+        self.assertIn("theme_selected_bg_color",
+                      theme.stylesheet({}).decode())
 
     def test_the_two_curves_are_told_apart_without_colour(self):
         self.assertEqual(theme.CURVE_DASH["cpu"], [])

@@ -1,8 +1,8 @@
 # strixctl
 
 Battery charge limit, fan curves and keyboard backlight for ASUS ROG laptops on
-Linux. A small GTK3 app that talks to the kernel's own sysfs interfaces, with
-a black and white skin of its own.
+Linux. A small GTK3 app that talks to the kernel's own sysfs interfaces and
+looks like the rest of your desktop.
 
 Built and tested on a **ROG Strix G712LU**, Debian 13 (trixie), kernel 6.12,
 Cinnamon. Sample size: one laptop. Mine.
@@ -331,51 +331,33 @@ along with a fan curve, and applying a curve never spawns OpenRGB.
 
 ## The look
 
-Every control is a plate standing above the page on two sheared planes, a lit
-one down its right edge and a dark one along its bottom. Pressing it drops it
-the three pixels into the space those planes were in, and they go, so it ends
-up flush. Depth is geometry here, not blur: there is not a rounded corner, a
-gradient or a soft shadow anywhere.
+It looks like the rest of your desktop, because nearly all of it is your
+desktop. The window takes your GTK theme's widgets, your theme's light or
+dark colours and your desktop's font, and brings almost nothing of its own:
+a few sizes and weights, so a reading looks like a reading, and one change
+of substance.
 
-That plate is CRED's `neopop-web` elevated button, followed closely enough to
-be recognisable: `variant="primary"`, `kind="elevated"`, `colorMode="dark"`,
-and `size="big"` for the two Apply buttons. A 3px edge at 45 degrees, a
-#0d0d0d face with no border, #8A8A8A down the right and #3D3D3D along the
-bottom, and a 14px label at weight 700. GTK3 has neither pseudo-elements nor
-transforms, so the face and its planes are drawn in cairo by `gui.plate()`
-rather than themed; the stylesheet keeps the type, the label colours and the
-padding swap that makes the press.
+That change is the accent. A desktop accent is usually a strong blue or
+green, and it would otherwise land on Apply, on the chosen option in every
+row, on the slider's filled half and on the focus ring. Those are states,
+not data, so `theme.py` pulls them back to a grey mixed from your theme's
+own foreground and background. There is not a single hex value in the
+stylesheet, which is what keeps it right whether your theme is light or
+dark.
 
-Two things are not in the reference and are deliberate. A plate that is the
-chosen one of a row turns its face over to white and stays down, because a
-row of identical black plates cannot show you which one you picked; Apply
-does the same at rest, so the plate that acts is the one you see first.
-Holding any plate only moves it, as the reference does.
+What is left with a colour in it is the keyboard's own zones, the colour
+wheel that sets them, and whatever your theme uses to say something failed.
+That is also why the two fan curves are a solid line and a dashed one rather
+than two colours.
 
-The palette is black and white, defined in `theme.py` and nowhere else.
-Colour in this window means data, so the only things with a hue are the
-keyboard's own zones and a failure message. That is also why the two fan
-curves are a solid line and a dashed one rather than two colours.
-
-Two fonts carry it, neither of them shipped here, because neither licence
-allows redistribution:
-
-| Role | Font |
-| --- | --- |
-| The name in the header | Cirka |
-| Headings, buttons, readings | Gilroy ExtraBold |
-
-Drop the files in `~/.local/share/strixctl/fonts` and they are picked up at
-start-up through fontconfig's app-font list, which keeps them to this process:
-nothing is installed system-wide, and nothing else on your desktop sees them.
-Without them the skin keeps its shapes and falls back to your desktop's font.
-
-If you would rather it looked like the rest of your desktop, put this in
-`config.json` and the whole thing switches off:
+If you would rather have your desktop's accent back, put this in
+`config.json`:
 
 ```json
 "theme": "system"
 ```
+
+The sizes stay; only the greys switch off.
 
 ## Editing a curve
 
