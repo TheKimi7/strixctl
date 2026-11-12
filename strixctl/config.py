@@ -58,6 +58,8 @@ DEFAULTS = {
     "battery": {"limit": 80, "enabled": False},
     # null means "search the usual places"; see aura.CANDIDATE_BINARIES.
     "openrgb": {"binary": None, "device_index": None},
+    # "neopop" or "system"; see theme.py.
+    "theme": "neopop",
     # null means "leave the power mode wherever it is"; nothing is forced on a
     # machine whose owner has never picked one.
     "power": None,

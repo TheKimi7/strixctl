@@ -1,7 +1,8 @@
 # strixctl
 
 Battery charge limit, fan curves and keyboard backlight for ASUS ROG laptops on
-Linux. A small GTK3 app that talks to the kernel's own sysfs interfaces.
+Linux. A small GTK3 app that talks to the kernel's own sysfs interfaces, with
+a flat monochrome skin of its own.
 
 Built and tested on a **ROG Strix G712LU**, Debian 13 (trixie), kernel 6.12,
 Cinnamon. Sample size: one laptop. Mine.
@@ -327,6 +328,38 @@ Fans and Keyboard each own their setting outright. Each page has its own Apply
 and its own Revert, live only while that page has something unapplied, and
 Apply saves and applies that page alone. An unfinished colour never rides
 along with a fan curve, and applying a curve never spawns OpenRGB.
+
+## The look
+
+Flat plates with hard rules, stacked square shadows, and a press that drops
+the plate into its own shadow. Depth comes from offset rather than blur, and
+there is not a rounded corner or a gradient anywhere.
+
+It is monochrome on purpose: warm blacks and a paper white, defined in
+`theme.py` and nowhere else. Colour in this window means data, so the only
+things with a hue are the keyboard's own zones and a failure message. That is
+also why the two fan curves are a solid line and a dashed one rather than two
+colours.
+
+Two fonts carry it, neither of them shipped here, because neither licence
+allows redistribution:
+
+| Role | Font |
+| --- | --- |
+| The name in the header | Cirka |
+| Headings, buttons, readings | Gilroy ExtraBold |
+
+Drop the files in `~/.local/share/strixctl/fonts` and they are picked up at
+start-up through fontconfig's app-font list, which keeps them to this process:
+nothing is installed system-wide, and nothing else on your desktop sees them.
+Without them the skin keeps its shapes and falls back to your desktop's font.
+
+If you would rather it looked like the rest of your desktop, put this in
+`config.json` and the whole thing switches off:
+
+```json
+"theme": "system"
+```
 
 ## Editing a curve
 

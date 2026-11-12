@@ -11,7 +11,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from strixctl import aura, config as cfg, hw  # noqa: E402
+from strixctl import aura, config as cfg, hw, theme  # noqa: E402
 
 
 class Percent(unittest.TestCase):
@@ -211,6 +211,50 @@ class OpenRGB(unittest.TestCase):
             stdout="Error: Mode 'Nope' not found\n", stderr="", returncode=0)
         with self.assertRaisesRegex(OSError, "Nope"):
             self.backend.set_colors([[0, 0, 255]] * 4, mode="Static")
+
+
+#: Greys and accents DESIGN.md bans by name, so the skin cannot drift onto
+#: one of the framework defaults.
+BANNED_COLOURS = {"#09090b", "#18181b", "#27272a", "#71717a", "#a1a1aa",
+                  "#fafafa", "#000000", "#ffffff"}
+
+
+class Skin(unittest.TestCase):
+    def test_it_can_be_switched_off(self):
+        self.assertTrue(theme.wanted({}))
+        self.assertTrue(theme.wanted({"theme": "neopop"}))
+        self.assertFalse(theme.wanted({"theme": "system"}))
+        self.assertFalse(theme.wanted({"theme": "System"}))
+
+    def test_the_palette_is_its_own(self):
+        values = {v.lower() for v in theme.INK.values()}
+        self.assertFalse(values & BANNED_COLOURS)
+        for value in values:
+            self.assertRegex(value, r"^#[0-9a-f]{6}$")
+
+    def test_the_stylesheet_builds_without_fonts(self):
+        heavy, title = theme.HEAVY, theme.TITLE
+        try:
+            theme.HEAVY = theme.TITLE = ""
+            css = theme.stylesheet().decode()
+            self.assertIn("font-family: inherit", css)
+            self.assertNotIn("%(", css)
+        finally:
+            theme.HEAVY, theme.TITLE = heavy, title
+
+    def test_the_stylesheet_names_a_loaded_font(self):
+        heavy, title = theme.HEAVY, theme.TITLE
+        try:
+            theme.HEAVY, theme.TITLE = "Gilroy", "Cirka"
+            css = theme.stylesheet().decode()
+            self.assertIn('font-family: "Gilroy"', css)
+            self.assertIn('font-family: "Cirka"', css)
+        finally:
+            theme.HEAVY, theme.TITLE = heavy, title
+
+    def test_the_two_curves_are_told_apart_without_colour(self):
+        self.assertEqual(theme.CURVE_DASH["cpu"], [])
+        self.assertTrue(theme.CURVE_DASH["gpu"])
 
 
 try:

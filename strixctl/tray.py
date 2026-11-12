@@ -33,6 +33,7 @@ from gi.repository import GLib, Gtk, XApp
 from . import apply as apply_mod
 from . import config as cfg
 from . import hw
+from . import theme
 
 POLL_SECONDS = 2
 #: A gap between the two clocks growing by more than this means the machine
@@ -50,6 +51,9 @@ def _slept_for():
 
 class Tray:
     def __init__(self):
+        # The menu is the first thing drawn, and the window may open later in
+        # this same process, so the skin has to be in place before either.
+        theme.apply(cfg.load())
         self.icon = XApp.StatusIcon()
         self.icon.set_icon_name("computer")
         self.platform = hw.PlatformProfile()

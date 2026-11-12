@@ -28,6 +28,7 @@ size and spacing: colours and fonts come from the desktop theme.
 import copy
 import threading
 
+import cairo
 import gi
 
 # Both must be pinned. `from gi.repository import Gdk, Gtk` resolves Gdk first,
@@ -41,15 +42,26 @@ from . import apply as apply_mod
 from . import aura as aura_mod
 from . import config as cfg
 from . import hw
+from . import theme
 from .colorwheel import ColorEditor
 
+#: Used only when the NeoPOP skin is off; with it on the curves are
+#: monochrome and told apart by theme.CURVE_DASH instead.
 CURVE_COLORS = {"cpu": (0.20, 0.55, 0.95), "gpu": (0.95, 0.45, 0.15)}
+
+#: Set once, by the window, before anything is drawn. The cairo widgets read
+#: it at draw time to decide whether to paint in colour or in ink.
+SKIN = False
 FAN_TITLES = {"cpu": "CPU fan", "gpu": "GPU fan"}
 CHARGE_CHOICES = (60, 80, 100)
 
-CSS = b"""
+#: The plain look, for `"theme": "system"` in config.json. The skin's own
+#: stylesheet lives in theme.py.
+PLAIN_CSS = b"""
 .strix-tile { padding: 10px 14px; border: 1px solid alpha(@theme_fg_color, 0.14);
               border-radius: 6px; }
+.strix-title { font-size: 170%; font-weight: bold; }
+.strix-subtitle { font-size: 85%; opacity: 0.6; }
 .strix-tile-title { font-size: 85%; opacity: 0.6; }
 .strix-tile-value { font-size: 170%; font-weight: bold; }
 .strix-tile-sub { font-size: 85%; opacity: 0.6; }
@@ -108,8 +120,11 @@ class Choice(Gtk.Box):
     """
 
     def __init__(self, on_pick=None):
-        super().__init__()
-        self.get_style_context().add_class("linked")
+        # Joined into one block under the desktop theme, but spaced apart
+        # under the skin, where every plate casts its own shadow.
+        super().__init__(spacing=6 if SKIN else 0)
+        if not SKIN:
+            self.get_style_context().add_class("linked")
         self.on_pick = on_pick
         self._buttons = {}
         self._quiet = False
@@ -181,7 +196,7 @@ class CurvePlot(Gtk.DrawingArea):
     drag through `on_point_moved(fan, index, temp, percent)`, already clamped.
     """
 
-    LEFT, RIGHT, TOP, BOTTOM = 44, 16, 22, 26
+    LEFT, RIGHT, TOP, BOTTOM = 44, 16, 34, 24
     GRAB_RADIUS = 12
 
     def __init__(self, on_point_moved=None):
@@ -305,6 +320,15 @@ class CurvePlot(Gtk.DrawingArea):
 
     # ------------------------------------------------------------- painting
 
+    @staticmethod
+    def _ink(cr, fan, alpha):
+        """Set the colour and dash for one fan's line."""
+        if SKIN:
+            cr.set_source_rgba(*theme.PLOT["line"], alpha)
+            cr.set_dash(theme.CURVE_DASH[fan])
+        else:
+            cr.set_source_rgba(*CURVE_COLORS[fan], alpha)
+
     def on_draw(self, _widget, cr):
         left, top, width, height = self._plot_area()
         fg = self.get_style_context().get_color(Gtk.StateFlags.NORMAL)
@@ -346,8 +370,7 @@ class CurvePlot(Gtk.DrawingArea):
             cr.stroke()
             cr.set_dash([])
             text = f"CPU {self.temp_now}°C"
-            cr.move_to(min(x + 5, left + width - cr.text_extents(text).width),
-                       top - 7)
+            cr.move_to(left + width - cr.text_extents(text).width, top - 14)
             cr.show_text(text)
 
         # The fan being edited goes on top, the other one stays in the back.
@@ -357,40 +380,60 @@ class CurvePlot(Gtk.DrawingArea):
             if not points:
                 continue
             front = fan == self.selected or not self.editable
-            alpha = 1.0 if front else 0.35
-            cr.set_source_rgba(*CURVE_COLORS[fan], alpha)
+            alpha = 1.0 if front else (0.5 if SKIN else 0.35)
+            self._ink(cr, fan, alpha)
             cr.set_line_width(2.5 if front else 1.5)
             for index, (temp, percent) in enumerate(points):
                 x, y = self._to_xy(temp, percent)
                 cr.line_to(x, y) if index else cr.move_to(x, y)
             cr.stroke()
+            cr.set_dash([])
             if front and self.editable:
+                # Square handles, to match the plates everywhere else.
                 for index, (temp, percent) in enumerate(points):
                     x, y = self._to_xy(temp, percent)
-                    active = index in (self._drag, self._hover)
-                    cr.arc(x, y, 7 if active else 4.5, 0, 6.2832)
+                    size = 11 if index in (self._drag, self._hover) else 7
+                    if SKIN:
+                        cr.rectangle(x - size / 2, y - size / 2, size, size)
+                    else:
+                        cr.arc(x, y, size / 2, 0, 6.2832)
                     cr.fill()
             if show_now:
                 x, y = self._to_xy(self.temp_now, speed_at(points, self.temp_now))
-                cr.set_source_rgba(fg.red, fg.green, fg.blue, alpha)
-                cr.arc(x, y, 6, 0, 6.2832)
-                cr.fill()
-                cr.set_source_rgba(*CURVE_COLORS[fan], alpha)
-                cr.arc(x, y, 3.5, 0, 6.2832)
-                cr.fill()
+                if SKIN:
+                    cr.set_source_rgba(*theme.PLOT["line"], alpha)
+                    cr.rectangle(x - 6, y - 6, 12, 12)
+                    cr.fill()
+                    cr.set_source_rgb(*_rgb(theme.INK["page"]))
+                    cr.rectangle(x - 3, y - 3, 6, 6)
+                    cr.fill()
+                else:
+                    cr.set_source_rgba(fg.red, fg.green, fg.blue, alpha)
+                    cr.arc(x, y, 6, 0, 6.2832)
+                    cr.fill()
+                    cr.set_source_rgba(*CURVE_COLORS[fan], alpha)
+                    cr.arc(x, y, 3.5, 0, 6.2832)
+                    cr.fill()
 
-        # Legend, in the curves' own colours, with the measured speeds.
+        # Legend. The sample is drawn with the curve's own line style, so a
+        # monochrome graph still says which line is which.
         cr.set_font_size(11)
-        x = left + 10
+        if SKIN and theme.HEAVY:
+            cr.select_font_face(theme.HEAVY, cairo.FONT_SLANT_NORMAL,
+                                cairo.FONT_WEIGHT_BOLD)
+        x = left
         for fan in ("cpu", "gpu"):
             speed = self.rpm.get(fan)
             text = FAN_TITLES[fan] + (f"  {speed} rpm" if speed is not None else "")
-            cr.set_source_rgba(*CURVE_COLORS[fan], 1.0)
-            cr.rectangle(x, top + 9, 10, 3)
-            cr.fill()
-            cr.move_to(x + 15, top + 15)
+            self._ink(cr, fan, 1.0)
+            cr.set_line_width(2.5)
+            cr.move_to(x, top - 18)
+            cr.line_to(x + 16, top - 18)
+            cr.stroke()
+            cr.set_dash([])
+            cr.move_to(x + 22, top - 14)
             cr.show_text(text)
-            x += cr.text_extents(text).width + 36
+            x += cr.text_extents(text).width + 46
         if self.caption:
             cr.set_source_rgba(fg.red, fg.green, fg.blue, 0.6)
             cr.move_to(left + width - cr.text_extents(self.caption).width - 8,
@@ -451,9 +494,14 @@ class KeyboardStrip(Gtk.DrawingArea):
             cr.rectangle(zone * (span + gap), 0, span + (0 if gap else 0.5), height)
             cr.fill()
         if self.how == self.ZONED and self.on_zone is not None:
+            # The selected zone gets a paper rule with an ink keyline inside,
+            # which stays visible whatever colour the zone is set to.
             x = self.active * (span + gap)
             cr.set_line_width(3)
-            cr.set_source_rgba(fg.red, fg.green, fg.blue, dim)
+            if SKIN:
+                cr.set_source_rgba(*theme.PLOT["line"], dim)
+            else:
+                cr.set_source_rgba(fg.red, fg.green, fg.blue, dim)
             cr.rectangle(x + 1.5, 1.5, span - 3, height - 3)
             cr.stroke()
             cr.set_line_width(1)
@@ -461,6 +509,12 @@ class KeyboardStrip(Gtk.DrawingArea):
             cr.rectangle(x + 3.5, 3.5, span - 7, height - 7)
             cr.stroke()
         return False
+
+
+def _rgb(value):
+    """"#rrggbb" as the 0-1 triple cairo wants."""
+    value = value.lstrip("#")
+    return tuple(int(value[i:i + 2], 16) / 255 for i in (0, 2, 4))
 
 
 def _hue(position):
@@ -477,16 +531,21 @@ class StrixWindow(Gtk.Window):
 
     def __init__(self):
         super().__init__(title="strixctl")
-        self.set_default_size(720, 620)
-
-        provider = Gtk.CssProvider()
-        provider.load_from_data(CSS)
-        Gtk.StyleContext.add_provider_for_screen(
-            Gdk.Screen.get_default(), provider,
-            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        self.set_default_size(720, 700)
 
         self.config = cfg.load()
         startup_notes = list(cfg.warnings)
+
+        # Before any widget exists: the skin loads fonts, and Pango caches
+        # its font map the moment something is measured.
+        global SKIN
+        SKIN = theme.apply(self.config)
+        provider = Gtk.CssProvider()
+        provider.load_from_data(PLAIN_CSS)
+        Gtk.StyleContext.add_provider_for_screen(
+            Gdk.Screen.get_default(), provider,
+            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+            - (1 if SKIN else 0))
         self._disk = copy.deepcopy(self.config)
         self._seen_mtime = cfg.mtime()
         self.battery = hw.Battery()
@@ -508,9 +567,11 @@ class StrixWindow(Gtk.Window):
         self.connect("destroy", self._on_destroy)
 
         outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        outer.get_style_context().add_class("strix-root")
         self.add(outer)
         self.infobar = self._build_infobar()
         outer.pack_start(self.infobar, False, False, 0)
+        outer.pack_start(self._build_header(), False, False, 0)
 
         self.stack = Gtk.Stack()
         self.stack.add_titled(self._build_home_page(), "home", "Home")
@@ -519,7 +580,6 @@ class StrixWindow(Gtk.Window):
         switcher = Gtk.StackSwitcher()
         switcher.set_stack(self.stack)
         switcher.set_halign(Gtk.Align.START)
-        switcher.set_margin_top(14)
         switcher.set_margin_start(14)
         outer.pack_start(switcher, False, False, 0)
         outer.pack_start(self.stack, True, True, 0)
@@ -568,6 +628,20 @@ class StrixWindow(Gtk.Window):
 
     # ------------------------------------------------------------------ chrome
 
+    def _build_header(self):
+        """The name of the thing, and the machine it is talking to."""
+        box = Gtk.Box(spacing=10)
+        box.set_margin_start(14)
+        box.set_margin_end(14)
+        box.set_margin_top(10)
+        box.set_margin_bottom(8)
+        board = _label(hw.board_name().upper(), "strix-subtitle")
+        board.set_valign(Gtk.Align.END)
+        board.set_margin_bottom(4)
+        box.pack_start(_label("strixctl", "strix-title"), False, False, 0)
+        box.pack_start(board, False, False, 0)
+        return box
+
     def _build_infobar(self):
         bar = Gtk.InfoBar()
         bar.set_message_type(Gtk.MessageType.WARNING)
@@ -592,8 +666,8 @@ class StrixWindow(Gtk.Window):
 
     @staticmethod
     def _page():
-        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
-        page.set_border_width(14)
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        page.set_border_width(12)
         return page
 
     def _action_row(self, section, apply_label, on_apply):
@@ -668,9 +742,7 @@ class StrixWindow(Gtk.Window):
 
         page.pack_start(_label(
             "The power mode and the charge limit take effect as soon as you "
-            "pick one. The fans and the keyboard are set on their own pages "
-            "and have nothing to do with each other.", "strix-dim", wrap=True),
-            False, False, 6)
+            "pick one.", "strix-dim", wrap=True), False, False, 2)
         return page
 
     def _build_fan_page(self):
