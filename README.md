@@ -96,7 +96,7 @@ udev covers the device-backed attributes, and the service covers
 before 6.14, and there is no `platform-profile` class for a rule to match. Yes,
 two mechanisms for one job. Take it up with the kernel.
 
-To restore your profile at login:
+To put your settings back at login:
 
 ```sh
 systemctl --user enable --now strixctl-apply.service
@@ -109,14 +109,14 @@ Uninstall with `sudo ./install.sh --uninstall`. No hard feelings.
 | Control | Interface | Status |
 | --- | --- | --- |
 | Battery charge limit | `BAT*/charge_control_end_threshold` | works |
-| Platform profile | `/sys/firmware/acpi/platform_profile` | works |
+| Power mode | `/sys/firmware/acpi/platform_profile` | works |
 | Fan curves, 8 points × 2 fans | `asus_custom_fan_curve` hwmon | works |
 | Fan speeds and CPU temperature | `asus` and `coretemp` hwmon | read-only |
 | Keyboard colour: 4 zones, 5 effects, speed | OpenRGB CLI to N-KEY `0b05:1866` | works, needs OpenRGB |
 
-Profiles bundle the platform profile, both fan curves and a keyboard colour,
-and switch together from the window or the tray. One click, whole vibe
-changes.
+Every one of them is independent. There are no profiles to bundle them into:
+the fans know nothing about the keyboard, and setting one never writes the
+other. Each has its own page in the window and its own line in the config.
 
 Keyboard **brightness** is not on that list, on purpose. Your desktop already
 has a control for it (the Fn keys and the power applet, by way of UPower), and
@@ -173,7 +173,7 @@ hoping for the best.
 The SDK socket was considered and rejected: decoding the controller-data blob is
 several hundred lines of variable-length parsing (u16-length-prefixed strings,
 mode and zone arrays, protocol-version-conditional fields) against a spec that
-does not state its endianness. For a knob that changes on a profile switch,
+does not state its endianness. For a knob that changes now and then,
 `subprocess.run` is the better trade. I am not writing a parser for that. You
 are not writing a parser for that. Nobody is writing a parser for that.
 
@@ -227,7 +227,7 @@ than refusing to start:
 | Feature | Needs |
 | --- | --- |
 | Battery charge limit | `BAT*/charge_control_end_threshold` |
-| Platform profile | `/sys/firmware/acpi/platform_profile` |
+| Power mode | `/sys/firmware/acpi/platform_profile` |
 | Fan curves | an `asus_custom_fan_curve` hwmon |
 | Keyboard colour | an ASUS N-KEY USB device, plus OpenRGB |
 
@@ -295,34 +295,38 @@ strixctl status          # every knob, its value, and whether it is writable
 strixctl gui             # the control window
 strixctl tray            # tray icon
 strixctl battery 80      # charge limit; 'off' clears it back to 100%
-strixctl profile Silent  # switch and apply
+strixctl power quiet     # power mode; no argument lists them
+strixctl apply           # put every saved setting back on the hardware
 strixctl fans reset      # hand both fans back to the firmware curve
 strixctl fans test       # prove a custom curve actually moves the fans (~1 min)
 strixctl fans watch      # live temperature and fan speeds, Ctrl-C to stop
 strixctl colour ff0000   # all four zones red
-strixctl colour ff0000 ff3c00 ff7800 ffb400 --save   # per zone, stored in the profile
+strixctl colour ff0000 ff3c00 ff7800 ffb400 --save   # per zone, and store it
 strixctl colour list     # what OpenRGB sees
 ```
 
 `strixctl status` is the one to run first, and the one to paste into an issue.
 
-Config lives in `~/.config/strixctl/config.json`. Fan speeds in it are percent.
-A config from before that was true (0-255 values, no `"version"` key) is
-converted the first time it is loaded, and the original is kept next to it as
-`config.v1.json`.
+Config lives in `~/.config/strixctl/config.json`. Fan speeds in it are
+percent, and there is one of everything: one curve per fan, one colour, one
+power mode, one charge limit.
+
+Older files are converted the first time they are loaded, and the original is
+kept next to it as `config.v1.json` or `config.v2.json`. Version 1 stored fan
+speeds as the kernel's 0-255; versions 1 and 2 bundled everything into named
+profiles, and the conversion keeps whichever profile was active at the time.
 
 ## The window
 
-The profile buttons across the top are the main control: click one and that
-profile is switched to and applied, same as the tray. Everything below edits
-the profile that is selected, and nothing you edit touches the machine until
-you press Apply. Apply and Revert only light up when there is something
-unapplied, so there is no guessing whether you saved.
+Three pages. Home shows what the machine is doing right now (CPU temperature,
+both fan speeds, the keyboard) and holds the two knobs that belong to the
+machine rather than to a page: the power mode and the charge limit. Both take
+effect the moment you pick one.
 
-Home shows what the machine is doing right now (CPU temperature, both fans,
-the keyboard) and holds the two things that are not a curve or a colour: the
-profile's power mode, and the charge limit. The charge limit belongs to the
-machine and not to a profile, so it takes effect the moment you pick it.
+Fans and Keyboard each own their setting outright. Each page has its own Apply
+and its own Revert, live only while that page has something unapplied, and
+Apply saves and applies that page alone. An unfinished colour never rides
+along with a fan curve, and applying a curve never spawns OpenRGB.
 
 ## Editing a curve
 
@@ -345,8 +349,8 @@ curve, read from the machine. If you ever doubt that a curve is doing
 anything, `strixctl fans test` holds the fans at 40% and then 75% and checks
 that the speeds follow.
 
-"Start from the firmware curve" copies the firmware's real curve for the power
-mode the machine is in. Balanced tops out at 83% on this chassis, so the last
+"Start from the firmware curve" copies the firmware's real curve for the
+power mode the machine is in. Balanced tops out at 83% on this chassis, so the last
 point is raised to 100% and the window says so.
 
 The UI will not let you draw something the validator then rejects, because being
@@ -361,19 +365,20 @@ fans can still go flat out when it gets hot. Your laptop is not a space heater
 and I would like it to stay that way.
 
 Handing the fans back to the firmware (`pwm*_enable = 3`, which also reloads
-the firmware's curve for the current platform profile) is "Firmware decides"
+the firmware's curve for the current power mode) is "Firmware decides"
 plus Apply in the window, one item in the tray menu, and `strixctl fans reset`
 on the command line. Three escape hatches, because fans are the one thing here
 that can actually cook something.
 
-Switching the platform profile makes the firmware reload its own curve, so
-strixctl re-arms a custom curve immediately afterwards. That ordering matters:
-applying the curve first and the profile second silently loses the curve, which
+Changing the power mode makes the firmware reload its own curve, so strixctl
+re-arms a custom curve immediately afterwards, wherever the change came from:
+the window, the tray menu or `strixctl power`. That ordering matters, because
+applying the curve first and the mode second silently loses the curve, which
 is a genuinely infuriating bug to chase.
 
 A resume from sleep can lose the curve the same way, so the tray puts it back
 when the machine wakes. That only works while the tray is running, because
-there is still no daemon. The tray never switches profile on its own.
+there is still no daemon.
 
 ## Known gaps
 
