@@ -96,7 +96,7 @@ V1 = {
 
 
 def _v2():
-    """The same file after the v1 -> v2 step, which is what Kimi's disk holds."""
+    """The same file after the v1 -> v2 step, as an existing install holds it."""
     data = copy.deepcopy(V1)
     cfg._to_v2(data)
     data["version"] = 2
