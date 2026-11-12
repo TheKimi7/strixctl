@@ -5,6 +5,7 @@ Run from the checkout:  python3 -m unittest discover -s tests
 
 import copy
 import os
+import re
 import sys
 import types
 import unittest
@@ -213,10 +214,11 @@ class OpenRGB(unittest.TestCase):
             self.backend.set_colors([[0, 0, 255]] * 4, mode="Static")
 
 
-#: Greys and accents DESIGN.md bans by name, so the skin cannot drift onto
-#: one of the framework defaults.
+#: The greys DESIGN.md bans by name, so the skin cannot drift onto one of the
+#: framework defaults. Pure black and white are not among them: the palette is
+#: meant to be black and white, and so is the reference it follows.
 BANNED_COLOURS = {"#09090b", "#18181b", "#27272a", "#71717a", "#a1a1aa",
-                  "#fafafa", "#000000", "#ffffff"}
+                  "#fafafa"}
 
 
 class Skin(unittest.TestCase):
@@ -231,6 +233,43 @@ class Skin(unittest.TestCase):
         self.assertFalse(values & BANNED_COLOURS)
         for value in values:
             self.assertRegex(value, r"^#[0-9a-f]{6}$")
+
+    def test_the_plate_matches_the_reference(self):
+        # @cred/neopop-web's elevated button, primary, dark: a 3px edge, a
+        # lit plane down the right and a dark one along the bottom.
+        self.assertEqual(theme.EDGE, 3)
+        self.assertEqual(theme.POP, {"right": "#8a8a8a", "bottom": "#3d3d3d"})
+        self.assertEqual(theme.triple("#ffffff"), (1.0, 1.0, 1.0))
+        self.assertEqual(theme.triple("#000000"), (0.0, 0.0, 0.0))
+        for fill in theme.POP_FILL.values():
+            self.assertTrue(all(0.0 <= part <= 1.0 for part in fill))
+
+    def test_the_press_only_moves_the_padding(self):
+        css = theme.stylesheet().decode()
+        # Pressing swaps the padding rather than resizing anything: the plate
+        # drops into the space the planes stood in and the allocation holds,
+        # so nothing around it reflows.
+        self.assertIn("padding: 0 19px 3px 16px", css)
+        self.assertIn("padding: 3px 16px 0 19px", css)
+        # Every pair has to move the same total, or the plate would change
+        # size as it is pressed.
+        for rest, down in re.findall(
+                r"padding: 0 (\d+)px 3px (\d+)px", css):
+            self.assertEqual(int(rest) - int(down), theme.EDGE)
+        # Plate rules are scoped: a button that was never given planes must
+        # not get a label sitting off centre, so the one unscoped `button`
+        # rule sets colours and nothing else.
+        unscoped = re.search(r"\nbutton \{(.*?)\}", css, re.S)
+        self.assertIsNotNone(unscoped)
+        for property_ in ("padding", "margin", "min-height"):
+            self.assertNotIn(property_, unscoped.group(1))
+        self.assertIn("button.strix-pop {", css)
+        self.assertIn("button.strix-pop.strix-big", css)
+
+    def test_a_plate_face_is_defined_for_every_state(self):
+        self.assertEqual(set(theme.PLATE), {"rest", "down", "off", "card"})
+        self.assertEqual(set(theme.PLATE_FILL), set(theme.PLATE))
+        self.assertEqual(theme.PLATE["down"], theme.INK["paper"])
 
     def test_the_stylesheet_builds_without_fonts(self):
         heavy, title = theme.HEAVY, theme.TITLE

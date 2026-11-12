@@ -111,6 +111,94 @@ def _label(text="", *classes, xalign=0, wrap=False):
     return label
 
 
+#: States in which a plate is flush with the page, so it has no planes.
+_FLUSH = (Gtk.StateFlags.ACTIVE | Gtk.StateFlags.CHECKED
+          | Gtk.StateFlags.INSENSITIVE)
+
+
+def _face_of(widget):
+    """(fill, flush) for a plate: which face colour, and is it pressed in.
+
+    Holding a plate only moves it, as in the reference. Turning the face over
+    means something else: this plate is the chosen one, or the one that acts.
+    """
+    style = widget.get_style_context()
+    if style.has_class("strix-tile"):
+        return theme.PLATE_FILL["card"], False
+    flags = widget.get_state_flags()
+    held = bool(flags & Gtk.StateFlags.ACTIVE)
+    if flags & Gtk.StateFlags.INSENSITIVE:
+        return theme.PLATE_FILL["off"], True
+    if flags & Gtk.StateFlags.CHECKED:
+        return theme.PLATE_FILL["down"], True
+    if style.has_class("suggested-action"):
+        return theme.PLATE_FILL["down"], held
+    return theme.PLATE_FILL["rest"], held
+
+
+def _plate_draw(widget, cr):
+    """Paint a plate: the face, and the two planes that stand it up.
+
+    Runs before GTK draws the widget, so the label lands on top of the face.
+    Both planes are the reference's 45 degree shear, which falls out of
+    starting the plane's far edge `edge` pixels further down (the right one)
+    or along (the bottom one). They meet on the diagonal through the corner,
+    so the corner is mitred rather than painted twice.
+
+    Pressed, the face moves into the space the planes were in and they are
+    not drawn at all, which is what makes a pressed plate read as flush.
+    """
+    edge = theme.EDGE
+    width, height = widget.get_allocated_width(), widget.get_allocated_height()
+    right, bottom = width - edge, height - edge
+    if right <= 0 or bottom <= 0:
+        return False
+    face, flush = _face_of(widget)
+    cr.set_source_rgb(*face)
+    if flush:
+        cr.rectangle(edge, edge, right, bottom)
+        cr.fill()
+        return False
+    cr.rectangle(0, 0, right, bottom)
+    cr.fill()
+    cr.set_source_rgb(*theme.POP_FILL["bottom"])
+    cr.move_to(0, bottom)
+    cr.line_to(right, bottom)
+    cr.line_to(width, height)
+    cr.line_to(edge, height)
+    cr.close_path()
+    cr.fill()
+    cr.set_source_rgb(*theme.POP_FILL["right"])
+    cr.move_to(right, 0)
+    cr.line_to(width, edge)
+    cr.line_to(width, height)
+    cr.line_to(right, bottom)
+    cr.close_path()
+    cr.fill()
+    return False
+
+
+def plate(widget, big=False):
+    """Make a widget a NeoPOP plate, drawn rather than themed.
+
+    The face has to be drawn rather than left to CSS: GTK3 clips a widget's
+    drawing to its CSS margin box, so a plate that reserved room for the
+    planes with a margin could not then reach it. Instead the plate fills its
+    whole allocation, the planes take the last `theme.EDGE` pixels of it, and
+    the stylesheet pads the label inwards by the same amount.
+
+    A no-op when the skin is off, so call sites never have to ask.
+    """
+    if not SKIN:
+        return widget
+    style = widget.get_style_context()
+    style.add_class("strix-pop")
+    if big:
+        style.add_class("strix-big")       # the reference's size="big"
+    widget.connect("draw", _plate_draw)
+    return widget
+
+
 class Choice(Gtk.Box):
     """A row of joined buttons of which exactly one is down.
 
@@ -121,7 +209,7 @@ class Choice(Gtk.Box):
 
     def __init__(self, on_pick=None):
         # Joined into one block under the desktop theme, but spaced apart
-        # under the skin, where every plate casts its own shadow.
+        # under the skin, where every plate stands up on its own planes.
         super().__init__(spacing=6 if SKIN else 0)
         if not SKIN:
             self.get_style_context().add_class("linked")
@@ -141,6 +229,7 @@ class Choice(Gtk.Box):
             for key, text in options:
                 button = Gtk.RadioButton.new_with_label_from_widget(first, text)
                 button.set_mode(False)
+                plate(button)
                 first = first or button
                 button.connect("toggled", self._on_toggled, key)
                 self.pack_start(button, False, False, 0)
@@ -176,6 +265,7 @@ class Tile(Gtk.Box):
     def __init__(self, title):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         self.get_style_context().add_class("strix-tile")
+        plate(self)             # a card stands up the same way a button does
         self.value = _label("–", "strix-tile-value")
         self.value.set_ellipsize(Pango.EllipsizeMode.END)
         self.sub = _label("", "strix-tile-sub")
@@ -580,6 +670,8 @@ class StrixWindow(Gtk.Window):
         switcher = Gtk.StackSwitcher()
         switcher.set_stack(self.stack)
         switcher.set_halign(Gtk.Align.START)
+        for tab in switcher.get_children():
+            plate(tab)          # the switcher builds its own buttons
         switcher.set_margin_start(14)
         outer.pack_start(switcher, False, False, 0)
         outer.pack_start(self.stack, True, True, 0)
@@ -677,8 +769,10 @@ class StrixWindow(Gtk.Window):
         apply_button = Gtk.Button(label=apply_label)
         apply_button.get_style_context().add_class("suggested-action")
         apply_button.connect("clicked", on_apply)
+        plate(apply_button, big=True)
         revert = Gtk.Button(label="Revert")
         revert.connect("clicked", self.on_revert, section)
+        plate(revert, big=True)
         row.pack_end(apply_button, False, False, 0)
         row.pack_end(revert, False, False, 0)
         row.pack_end(note, True, True, 4)
@@ -717,6 +811,7 @@ class StrixWindow(Gtk.Window):
         edit_fans = Gtk.Button(label="Edit the curve")
         edit_fans.connect("clicked",
                           lambda *_: self.stack.set_visible_child_name("fans"))
+        plate(edit_fans)
         grid.attach(edit_fans, 2, 1, 1, 1)
 
         grid.attach(_label("Keyboard", "strix-heading"), 0, 2, 1, 1)
@@ -725,6 +820,7 @@ class StrixWindow(Gtk.Window):
         edit_kbd = Gtk.Button(label="Edit the colour")
         edit_kbd.connect("clicked",
                          lambda *_: self.stack.set_visible_child_name("keyboard"))
+        plate(edit_kbd)
         grid.attach(edit_kbd, 2, 2, 1, 1)
 
         grid.attach(_label("Battery", "strix-heading"), 0, 3, 1, 1)
@@ -780,8 +876,10 @@ class StrixWindow(Gtk.Window):
         stock.set_tooltip_text(
             "Replace both curves with the firmware's own, as a starting shape.")
         stock.connect("clicked", self.on_load_stock)
+        plate(stock)
         self.numbers_toggle = Gtk.ToggleButton(label="Edit as numbers")
         self.numbers_toggle.connect("toggled", self.on_numbers_toggled)
+        plate(self.numbers_toggle)
         self.fan_tools.pack_start(stock, False, False, 0)
         self.fan_tools.pack_start(self.numbers_toggle, False, False, 0)
         page.pack_start(self.fan_tools, False, False, 0)
@@ -857,6 +955,7 @@ class StrixWindow(Gtk.Window):
         self.match_button = Gtk.Button(label="Use this colour on every zone")
         self.match_button.set_halign(Gtk.Align.START)
         self.match_button.connect("clicked", self.on_match_zones)
+        plate(self.match_button)
         side.pack_start(self.match_button, False, False, 0)
         body.pack_start(side, False, False, 0)
         page.pack_start(body, False, False, 0)

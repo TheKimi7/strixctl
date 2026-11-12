@@ -2,7 +2,7 @@
 
 Battery charge limit, fan curves and keyboard backlight for ASUS ROG laptops on
 Linux. A small GTK3 app that talks to the kernel's own sysfs interfaces, with
-a flat monochrome skin of its own.
+a black and white skin of its own.
 
 Built and tested on a **ROG Strix G712LU**, Debian 13 (trixie), kernel 6.12,
 Cinnamon. Sample size: one laptop. Mine.
@@ -331,15 +331,31 @@ along with a fan curve, and applying a curve never spawns OpenRGB.
 
 ## The look
 
-Flat plates with hard rules, stacked square shadows, and a press that drops
-the plate into its own shadow. Depth comes from offset rather than blur, and
-there is not a rounded corner or a gradient anywhere.
+Every control is a plate standing above the page on two sheared planes, a lit
+one down its right edge and a dark one along its bottom. Pressing it drops it
+the three pixels into the space those planes were in, and they go, so it ends
+up flush. Depth is geometry here, not blur: there is not a rounded corner, a
+gradient or a soft shadow anywhere.
 
-It is monochrome on purpose: warm blacks and a paper white, defined in
-`theme.py` and nowhere else. Colour in this window means data, so the only
-things with a hue are the keyboard's own zones and a failure message. That is
-also why the two fan curves are a solid line and a dashed one rather than two
-colours.
+That plate is CRED's `neopop-web` elevated button, followed closely enough to
+be recognisable: `variant="primary"`, `kind="elevated"`, `colorMode="dark"`,
+and `size="big"` for the two Apply buttons. A 3px edge at 45 degrees, a
+#0d0d0d face with no border, #8A8A8A down the right and #3D3D3D along the
+bottom, and a 14px label at weight 700. GTK3 has neither pseudo-elements nor
+transforms, so the face and its planes are drawn in cairo by `gui.plate()`
+rather than themed; the stylesheet keeps the type, the label colours and the
+padding swap that makes the press.
+
+Two things are not in the reference and are deliberate. A plate that is the
+chosen one of a row turns its face over to white and stays down, because a
+row of identical black plates cannot show you which one you picked; Apply
+does the same at rest, so the plate that acts is the one you see first.
+Holding any plate only moves it, as the reference does.
+
+The palette is black and white, defined in `theme.py` and nowhere else.
+Colour in this window means data, so the only things with a hue are the
+keyboard's own zones and a failure message. That is also why the two fan
+curves are a solid line and a dashed one rather than two colours.
 
 Two fonts carry it, neither of them shipped here, because neither licence
 allows redistribution:
